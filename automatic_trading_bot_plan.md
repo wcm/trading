@@ -1151,4 +1151,7 @@ Recent commits:
 - `9e98009 Scaffold local paper trading bot`
 - `a03ee93 Add read-only option spread scanner`
 - `e301743 Update plan execution progress`
-- `2e41d99 Add read-only LLM decision pipeline`
+
+Latest milestone:
+
+- Add read-only LLM decision pipeline
