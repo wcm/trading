@@ -21,6 +21,10 @@ class OptionLeg:
     bid: Decimal
     ask: Decimal
     mid: Decimal
+    bid_ask_spread: Decimal
+    bid_ask_spread_pct_of_mid: Decimal | None
+    open_interest: int | None
+    open_interest_date: str | None
     quote_time: datetime | None
     quote_age_seconds: int | None
     delta: Decimal | None
@@ -44,6 +48,15 @@ class PutCreditSpreadCandidate:
     net_credit: str
     max_profit: str
     max_loss: str
+    liquidity_ok: bool
+    short_open_interest: int | None
+    long_open_interest: int | None
+    short_open_interest_date: str | None
+    long_open_interest_date: str | None
+    short_bid_ask_spread: str
+    long_bid_ask_spread: str
+    short_spread_pct_of_mid: str | None
+    long_spread_pct_of_mid: str | None
     short_delta: str | None
     long_delta: str | None
     short_quote_time: str | None
@@ -127,6 +140,19 @@ def scan_put_credit_spreads(
     min_credit_pct = _decimal_or_none(config.get("strategy", "min_credit_as_width_pct", default=0.20)) or Decimal("0.20")
     short_delta_min = _decimal_or_none(config.get("strategy", "short_put_delta_min", default=-0.30)) or Decimal("-0.30")
     short_delta_max = _decimal_or_none(config.get("strategy", "short_put_delta_max", default=-0.20)) or Decimal("-0.20")
+    min_short_open_interest = _int_or_none(
+        config.get("liquidity", "min_short_leg_open_interest", default=0)
+    )
+    min_long_open_interest = _int_or_none(
+        config.get("liquidity", "min_long_leg_open_interest", default=0)
+    )
+    min_short_bid = _decimal_or_none(config.get("liquidity", "min_short_leg_bid", default=0)) or Decimal("0")
+    max_leg_spread_pct_of_mid = _decimal_or_none(
+        config.get("liquidity", "max_leg_spread_pct_of_mid", default=1)
+    )
+    max_leg_spread_absolute = _decimal_or_none(
+        config.get("liquidity", "max_leg_spread_absolute", default=999)
+    )
 
     for (underlying, expiration, strike), short_leg in legs_by_underlying_expiration_strike.items():
         if short_leg.delta is None:
@@ -138,6 +164,16 @@ def scan_put_credit_spreads(
             long_strike = strike - width
             long_leg = legs_by_underlying_expiration_strike.get((underlying, expiration, long_strike))
             if not long_leg:
+                continue
+            if not _liquidity_ok(
+                short_leg=short_leg,
+                long_leg=long_leg,
+                min_short_open_interest=min_short_open_interest,
+                min_long_open_interest=min_long_open_interest,
+                min_short_bid=min_short_bid,
+                max_leg_spread_pct_of_mid=max_leg_spread_pct_of_mid,
+                max_leg_spread_absolute=max_leg_spread_absolute,
+            ):
                 continue
 
             net_credit = short_leg.bid - long_leg.ask
@@ -165,6 +201,15 @@ def scan_put_credit_spreads(
                     net_credit=_fmt_decimal(net_credit),
                     max_profit=_fmt_decimal(max_profit),
                     max_loss=_fmt_decimal(max_loss),
+                    liquidity_ok=True,
+                    short_open_interest=short_leg.open_interest,
+                    long_open_interest=long_leg.open_interest,
+                    short_open_interest_date=short_leg.open_interest_date,
+                    long_open_interest_date=long_leg.open_interest_date,
+                    short_bid_ask_spread=_fmt_decimal(short_leg.bid_ask_spread),
+                    long_bid_ask_spread=_fmt_decimal(long_leg.bid_ask_spread),
+                    short_spread_pct_of_mid=_fmt_optional_decimal(short_leg.bid_ask_spread_pct_of_mid),
+                    long_spread_pct_of_mid=_fmt_optional_decimal(long_leg.bid_ask_spread_pct_of_mid),
                     short_delta=_fmt_optional_decimal(short_leg.delta),
                     long_delta=_fmt_optional_decimal(long_leg.delta),
                     short_quote_time=short_leg.quote_time.isoformat() if short_leg.quote_time else None,
@@ -224,6 +269,8 @@ def _build_leg(contract: dict[str, Any], snapshot: dict[str, Any] | None, *, now
 
     quote_time = _parse_time(_nested_get(quote, "t", "timestamp"))
     quote_age_seconds = _age_seconds(now, quote_time)
+    bid_ask_spread = ask - bid
+    mid = (bid + ask) / Decimal("2")
 
     return OptionLeg(
         symbol=str(contract["symbol"]),
@@ -231,7 +278,11 @@ def _build_leg(contract: dict[str, Any], snapshot: dict[str, Any] | None, *, now
         expiration_date=expiration,
         bid=bid,
         ask=ask,
-        mid=(bid + ask) / Decimal("2"),
+        mid=mid,
+        bid_ask_spread=bid_ask_spread,
+        bid_ask_spread_pct_of_mid=(bid_ask_spread / mid) if mid > 0 else None,
+        open_interest=_int_or_none(contract.get("open_interest")),
+        open_interest_date=str(contract["open_interest_date"]) if contract.get("open_interest_date") else None,
         quote_time=quote_time,
         quote_age_seconds=quote_age_seconds,
         delta=_decimal_or_none(_nested_get(greeks, "delta")),
@@ -239,6 +290,37 @@ def _build_leg(contract: dict[str, Any], snapshot: dict[str, Any] | None, *, now
         theta=_decimal_or_none(_nested_get(greeks, "theta")),
         vega=_decimal_or_none(_nested_get(greeks, "vega")),
     )
+
+
+def _liquidity_ok(
+    *,
+    short_leg: OptionLeg,
+    long_leg: OptionLeg,
+    min_short_open_interest: int | None,
+    min_long_open_interest: int | None,
+    min_short_bid: Decimal,
+    max_leg_spread_pct_of_mid: Decimal | None,
+    max_leg_spread_absolute: Decimal | None,
+) -> bool:
+    if short_leg.bid < min_short_bid:
+        return False
+    if min_short_open_interest is not None:
+        if short_leg.open_interest is None or short_leg.open_interest < min_short_open_interest:
+            return False
+    if min_long_open_interest is not None:
+        if long_leg.open_interest is None or long_leg.open_interest < min_long_open_interest:
+            return False
+
+    for leg in (short_leg, long_leg):
+        if max_leg_spread_absolute is not None and leg.bid_ask_spread > max_leg_spread_absolute:
+            return False
+        if max_leg_spread_pct_of_mid is not None:
+            if leg.bid_ask_spread_pct_of_mid is None:
+                return False
+            if leg.bid_ask_spread_pct_of_mid > max_leg_spread_pct_of_mid:
+                return False
+
+    return True
 
 
 def _nested_get(mapping: dict[str, Any], *keys: str) -> Any:
@@ -253,6 +335,15 @@ def _decimal_or_none(value: Any) -> Decimal | None:
         return None
     try:
         return Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
+
+
+def _int_or_none(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(Decimal(str(value)))
     except (InvalidOperation, ValueError):
         return None
 

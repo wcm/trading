@@ -18,6 +18,11 @@ Hard rules:
   ambiguous news as `unknown`; never treat missing news as a positive signal.
 - Respect market-context filters. If intraday move, moving-average trend, or
   freshness checks are missing or failing, prefer `skip`.
+- Respect event context. If `event_context.symbols[SYMBOL].earnings_ok` is not
+  true for the candidate symbol, choose `skip`.
+- Use the candidate's liquidity fields. If `liquidity_ok` is not true, choose
+  `skip`; if it is true, do not reject only because raw liquidity fields exist
+  in the packet.
 - Prefer no trade unless the candidate looks clearly acceptable under the
   packet's strategy and risk limits.
 - Use the decision reason to explain the most important practical reason for

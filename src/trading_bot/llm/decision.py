@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from trading_bot.config import AppConfig
+from trading_bot.data.events import EventContext
 from trading_bot.data.market_data import MarketContext
 from trading_bot.data.news import NewsContext
 from trading_bot.strategy.put_credit_spread import PutCreditSpreadScanResult
@@ -23,6 +24,7 @@ class DecisionPacket:
     risk_limits: dict[str, Any]
     market_filters: dict[str, Any]
     market_context: dict[str, Any]
+    event_context: dict[str, Any]
     option_scan: dict[str, Any]
     news_context: dict[str, Any]
     instructions: dict[str, Any]
@@ -40,6 +42,7 @@ def build_decision_packet(
     open_orders: list[dict[str, Any]],
     scan_result: PutCreditSpreadScanResult,
     market_context: MarketContext,
+    event_context: EventContext,
     news_context: NewsContext,
 ) -> DecisionPacket:
     return DecisionPacket(
@@ -59,6 +62,7 @@ def build_decision_packet(
         risk_limits=config.get("risk", default={}),
         market_filters=config.get("market_filters", default={}),
         market_context=market_context.to_dict(),
+        event_context=event_context.to_dict(),
         option_scan=scan_result.to_dict(),
         news_context=news_context.to_dict(),
         instructions={

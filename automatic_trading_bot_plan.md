@@ -1073,14 +1073,14 @@ Ops:
 
 ## 13. Immediate Next Step
 
-Add earnings/event filtering and a read-only order preview.
+Add a read-only Alpaca MLeg order preview for accepted `open` decisions.
 
 Recommended next implementation order:
 
-1. Add earnings-date blocking data.
-2. Add scheduled macro-event placeholders for CPI, FOMC, and major jobs reports.
-3. Add read-only Alpaca MLeg order payload preview for accepted `open` decisions.
-4. Add validator tests that accepted `open` decisions produce valid but unsubmitted Alpaca payloads.
+1. Add read-only Alpaca MLeg order payload preview for accepted `open` decisions.
+2. Add validator tests that accepted `open` decisions produce valid but unsubmitted Alpaca payloads.
+3. Add scheduled macro-event placeholders for CPI, FOMC, and major jobs reports.
+4. Replace manual paper-mode earnings dates with an external earnings/calendar provider before live trading.
 5. Keep actual order submission disabled.
 
 The next milestone is still not order placement. The next milestone is "an accepted LLM `open` decision can produce a valid Alpaca multi-leg order preview, while the bot remains unable to submit it."
@@ -1124,9 +1124,16 @@ Completed:
 - Added recent-news context to the LLM decision packet.
 - Added option quote timestamps and quote-age data to spread candidates.
 - Added hard validator checks for failed market trend, stale market bars, stale/unavailable option quotes, symbol mismatch, and max-loss limit.
+- Added candidate-level liquidity fields: open interest, bid/ask spread, spread percent of mid, and `liquidity_ok`.
+- Added hard validator checks for candidate liquidity, earnings/event context, high-risk news, negative news, and open-decision risk checklist values.
+- Added manual paper-mode earnings/event context to the LLM packet.
+- Added manual next earnings dates for AMD and META for paper testing.
+- Raised paper `risk.max_loss_per_trade` from USD 500 to USD 1,000 and `risk.max_open_risk` from USD 1,500 to USD 9,000 to match the aggressive paper experiment.
+- Relaxed `liquidity.max_leg_spread_absolute` from USD 0.20 to USD 0.50 while keeping the 15% spread-of-mid filter.
 - Added unit tests for config loading and put credit spread candidate construction.
 - Added unit tests for LLM decision packet construction and validator rejection paths.
 - Added unit test for stale market data blocking `market_trend_ok`.
+- Added unit tests for candidate liquidity fields, earnings/event blocking, and high-risk news blocking.
 - Updated paper-mode option data feed to `indicative` because Alpaca returned `OPRA agreement is not signed`.
 - Kept `opra` as the required live-mode target feed before real options execution.
 
@@ -1139,6 +1146,11 @@ Verified:
 - `uv run trading-bot decide --symbols QQQ --max-candidates 3 --mock-decision skip --json-output data/last_decision.json`
 - `uv run trading-bot decide --symbols QQQ --max-candidates 2 --json-output data/last_decision_openai.json`
 - `uv run trading-bot decide --symbols QQQ --max-candidates 2 --send-discord`
+- `uv run trading-bot scan-options --symbols AMD --max-candidates 5 --json-output data/last_option_scan_amd.json`
+- `uv run trading-bot decide --symbols AMD --max-candidates 5 --send-discord --json-output data/last_decision_amd.json`
+- `uv run trading-bot scan-options --symbols AMD,QQQ,AAPL,MSFT,NVDA,AMZN,META,GOOGL,TSLA --max-candidates 30 --json-output data/last_option_scan_broad.json`
+- `uv run trading-bot decide --symbols AMD,QQQ,AAPL,MSFT,NVDA,AMZN,META,GOOGL,TSLA --max-candidates 30 --send-discord --json-output data/last_decision_broad.json`
+- `uv run trading-bot decide --symbols META --max-candidates 10 --send-discord --json-output data/last_decision_meta_aggressive.json`
 - `uv run python -m unittest discover -s tests`
 - `uv run python -m compileall src tests`
 - `git diff --check`
@@ -1153,7 +1165,10 @@ Current known state:
 - The latest real LLM decision chose `skip` because QQQ failed the 30-minute moving-average market-trend filter.
 - Recent Alpaca/Benzinga news retrieval works and is included in the LLM packet.
 - Quote freshness is included in spread candidates and enforced by the validator for `open` decisions.
-- Earnings-date filtering is still not implemented.
+- Candidate liquidity is included in spread candidates and enforced by the validator for `open` decisions.
+- Manual paper-mode earnings/event context is included in the LLM packet and enforced by the validator for `open` decisions.
+- External earnings/calendar provider integration is still not implemented.
+- The latest real LLM decision accepted by the validator is an `open` recommendation for a read-only META put credit spread: `META-2026-06-12-597.50P-592.50P`, quantity 1, credit limit `-1.02`, max loss USD 398.
 - OPRA is not currently enabled because the OPRA agreement is not signed.
 - No order placement is implemented yet.
 
@@ -1168,4 +1183,4 @@ Recent commits:
 Latest milestone:
 
 - Add read-only LLM decision pipeline
-- Add market/news context and hard freshness gates
+- Add market/news/event/liquidity context and hard validator gates

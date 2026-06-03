@@ -79,6 +79,8 @@ class FakeAlpacaClient:
                 "tradable": True,
                 "expiration_date": "2026-06-19",
                 "strike_price": "95",
+                "open_interest": "1000",
+                "open_interest_date": "2026-06-03",
             },
             {
                 "symbol": "AAPL260619P00090000",
@@ -88,6 +90,8 @@ class FakeAlpacaClient:
                 "tradable": True,
                 "expiration_date": "2026-06-19",
                 "strike_price": "90",
+                "open_interest": "250",
+                "open_interest_date": "2026-06-03",
             },
         ]
 
@@ -104,7 +108,7 @@ class FakeAlpacaClient:
                 "greeks": {"delta": "-0.25", "gamma": "0.01", "theta": "-0.02", "vega": "0.10"},
             },
             "AAPL260619P00090000": {
-                "latestQuote": {"bp": "0.30", "ap": "0.40", "t": "2026-06-03T14:00:00Z"},
+                "latestQuote": {"bp": "0.31", "ap": "0.35", "t": "2026-06-03T14:00:00Z"},
                 "greeks": {"delta": "-0.15", "gamma": "0.01", "theta": "-0.01", "vega": "0.08"},
             },
         }
@@ -126,8 +130,11 @@ class PutCreditSpreadScanTests(unittest.TestCase):
         self.assertEqual(len(result.candidates), 1)
         candidate = result.candidates[0]
         self.assertEqual(candidate.underlying_symbol, "AAPL")
-        self.assertEqual(candidate.net_credit, "1.10")
-        self.assertEqual(candidate.max_loss, "390.00")
+        self.assertEqual(candidate.net_credit, "1.15")
+        self.assertEqual(candidate.max_loss, "385.00")
+        self.assertTrue(candidate.liquidity_ok)
+        self.assertEqual(candidate.short_open_interest, 1000)
+        self.assertEqual(candidate.long_open_interest, 250)
 
 
 if __name__ == "__main__":

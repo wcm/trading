@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 
 from trading_bot.config import load_config
+from trading_bot.data.events import build_event_context
 from trading_bot.data.market_data import build_market_context
 from trading_bot.data.news import build_news_context
 from trading_bot.llm.decision import build_decision_packet, candidate_dicts_by_id, packet_candidate_ids
@@ -52,6 +53,7 @@ class LlmDecisionTests(unittest.TestCase):
             option_feed="indicative",
         )
         market_context = build_market_context(config=config, alpaca=FakeAlpacaClient(), symbols=["AAPL"])
+        event_context = build_event_context(config=config, symbols=["AAPL"])
         news_context = build_news_context(config=config, alpaca=FakeAlpacaClient(), symbols=["AAPL"])
         packet = build_decision_packet(
             config=config,
@@ -61,6 +63,7 @@ class LlmDecisionTests(unittest.TestCase):
             open_orders=[],
             scan_result=scan,
             market_context=market_context,
+            event_context=event_context,
             news_context=news_context,
         )
 
@@ -68,6 +71,7 @@ class LlmDecisionTests(unittest.TestCase):
         self.assertEqual(packet_dict["mode"], "paper")
         self.assertEqual(packet_dict["instructions"]["must_choose_from_candidate_ids"], [scan.candidates[0].candidate_id])
         self.assertIn("market_context", packet_dict)
+        self.assertIn("event_context", packet_dict)
         self.assertIn("news_context", packet_dict)
 
     def test_validator_accepts_skip_decision(self) -> None:
@@ -155,10 +159,105 @@ class LlmDecisionTests(unittest.TestCase):
                     "market_trend_ok": False,
                 }
             },
+            event_context_by_symbol={
+                "AAPL": {
+                    "earnings_ok": True,
+                }
+            },
             max_loss_per_trade="500",
             max_option_quote_age_seconds=86_400,
         )
         self.assertTrue(any("Market trend filter is not passing" in error for error in errors))
+
+    def test_validator_rejects_open_when_earnings_filter_fails(self) -> None:
+        config = load_config("config/settings.yaml")
+        scan = scan_put_credit_spreads(
+            config=config,
+            alpaca=FakeAlpacaClient(),
+            symbols=["AAPL"],
+            max_candidates=5,
+            option_feed="indicative",
+        )
+        candidate = scan.candidates[0]
+        decision = valid_skip_decision()
+        decision.update(
+            {
+                "action": "open",
+                "symbol": "AAPL",
+                "candidate_id": candidate.candidate_id,
+                "quantity": 1,
+                "limit_price": "-1.00",
+            }
+        )
+
+        errors = validate_decision_payload(
+            decision,
+            candidate_ids=packet_candidate_ids(scan),
+            candidates_by_id=candidate_dicts_by_id(scan),
+            allowed_symbols={"AAPL"},
+            market_context_by_symbol={
+                "AAPL": {
+                    "latest_bar_fresh": True,
+                    "market_trend_ok": True,
+                }
+            },
+            event_context_by_symbol={
+                "AAPL": {
+                    "earnings_ok": False,
+                }
+            },
+            max_loss_per_trade="500",
+            max_option_quote_age_seconds=86_400,
+        )
+        self.assertTrue(any("Earnings/event filter is not passing" in error for error in errors))
+
+    def test_validator_rejects_open_on_high_risk_news(self) -> None:
+        config = load_config("config/settings.yaml")
+        scan = scan_put_credit_spreads(
+            config=config,
+            alpaca=FakeAlpacaClient(),
+            symbols=["AAPL"],
+            max_candidates=5,
+            option_feed="indicative",
+        )
+        candidate = scan.candidates[0]
+        decision = valid_skip_decision()
+        decision.update(
+            {
+                "action": "open",
+                "symbol": "AAPL",
+                "candidate_id": candidate.candidate_id,
+                "quantity": 1,
+                "limit_price": "-1.00",
+                "news_assessment": {
+                    "risk_level": "high",
+                    "sentiment": "negative",
+                    "summary": "Material negative company-specific news.",
+                },
+            }
+        )
+
+        errors = validate_decision_payload(
+            decision,
+            candidate_ids=packet_candidate_ids(scan),
+            candidates_by_id=candidate_dicts_by_id(scan),
+            allowed_symbols={"AAPL"},
+            market_context_by_symbol={
+                "AAPL": {
+                    "latest_bar_fresh": True,
+                    "market_trend_ok": True,
+                }
+            },
+            event_context_by_symbol={
+                "AAPL": {
+                    "earnings_ok": True,
+                }
+            },
+            max_loss_per_trade="500",
+            max_option_quote_age_seconds=86_400,
+        )
+        self.assertTrue(any("news risk_level is high" in error for error in errors))
+        self.assertTrue(any("news sentiment is negative" in error for error in errors))
 
 
 if __name__ == "__main__":

@@ -83,6 +83,7 @@ def validate_decision_payload(
     allowed_symbols: set[str] | None = None,
     open_position_symbols: set[str] | None = None,
     market_context_by_symbol: dict[str, dict[str, Any]] | None = None,
+    event_context_by_symbol: dict[str, dict[str, Any]] | None = None,
     max_loss_per_trade: str | int | float | None = None,
     max_option_quote_age_seconds: int | None = None,
 ) -> list[str]:
@@ -126,6 +127,7 @@ def validate_decision_payload(
             payload,
             candidates_by_id,
             market_context_by_symbol,
+            event_context_by_symbol,
             max_loss_per_trade,
             max_option_quote_age_seconds,
             errors,
@@ -182,6 +184,7 @@ def _validate_open_candidate_context(
     payload: dict[str, Any],
     candidates_by_id: dict[str, dict[str, Any]] | None,
     market_context_by_symbol: dict[str, dict[str, Any]] | None,
+    event_context_by_symbol: dict[str, dict[str, Any]] | None,
     max_loss_per_trade: str | int | float | None,
     max_option_quote_age_seconds: int | None,
     errors: list[str],
@@ -195,6 +198,9 @@ def _validate_open_candidate_context(
     decision_symbol = payload.get("symbol")
     if decision_symbol and candidate_symbol and decision_symbol != candidate_symbol:
         errors.append(f"Decision symbol {decision_symbol} does not match candidate symbol {candidate_symbol}")
+
+    if candidate.get("liquidity_ok") is not True:
+        errors.append("Candidate liquidity_ok is not true")
 
     if max_loss_per_trade is not None:
         candidate_max_loss = _decimal_or_none(candidate.get("max_loss"))
@@ -228,11 +234,25 @@ def _validate_open_candidate_context(
     if market_context.get("market_trend_ok") is not True:
         errors.append(f"Market trend filter is not passing for {candidate_symbol}")
 
+    if event_context_by_symbol is None or not candidate_symbol:
+        errors.append("Event context is unavailable for open decision")
+        return
+    event_context = event_context_by_symbol.get(str(candidate_symbol))
+    if not isinstance(event_context, dict):
+        errors.append(f"Event context is unavailable for {candidate_symbol}")
+    elif event_context.get("earnings_ok") is not True:
+        errors.append(f"Earnings/event filter is not passing for {candidate_symbol}")
+
 
 def _validate_nested_objects(payload: dict[str, Any], errors: list[str]) -> None:
     news = payload.get("news_assessment")
     if not isinstance(news, dict):
         errors.append("news_assessment must be an object")
+    elif payload.get("action") == "open":
+        if news.get("risk_level") == "high":
+            errors.append("Open decision rejected because news risk_level is high")
+        if news.get("sentiment") == "negative":
+            errors.append("Open decision rejected because news sentiment is negative")
 
     risk = payload.get("risk_checklist")
     if not isinstance(risk, dict):
@@ -241,6 +261,10 @@ def _validate_nested_objects(payload: dict[str, Any], errors: list[str]) -> None
         for key in DECISION_RESPONSE_JSON_SCHEMA["properties"]["risk_checklist"]["required"]:
             if not isinstance(risk.get(key), bool):
                 errors.append(f"risk_checklist.{key} must be boolean")
+        if payload.get("action") == "open":
+            for key in DECISION_RESPONSE_JSON_SCHEMA["properties"]["risk_checklist"]["required"]:
+                if risk.get(key) is not True:
+                    errors.append(f"Open decision requires risk_checklist.{key} to be true")
 
     exit_plan = payload.get("exit_plan")
     if not isinstance(exit_plan, dict):
