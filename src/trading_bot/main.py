@@ -9,10 +9,13 @@ from typing import Any
 
 from trading_bot.brokers.alpaca import AlpacaClient, AlpacaCredentialsError
 from trading_bot.config import load_config, load_env_file, resolve_path
+from trading_bot.llm.decision import build_decision_packet, candidate_dicts_by_id, packet_candidate_ids
+from trading_bot.llm.openai_client import OpenAIClient, OpenAIClientError
+from trading_bot.llm.schemas import validate_decision_payload
 from trading_bot.logging_config import configure_logging
 from trading_bot.notifications.discord import DiscordNotifier
 from trading_bot.risk.kill_switch import KillSwitch
-from trading_bot.storage.db import init_db, record_bot_run, record_option_scan
+from trading_bot.storage.db import init_db, record_bot_run, record_llm_decision, record_option_scan
 from trading_bot.strategy.put_credit_spread import scan_put_credit_spreads
 
 
@@ -68,6 +71,37 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional path to write the full scan result JSON.",
     )
 
+    decide = subparsers.add_parser("decide", help="Run read-only scan plus LLM decision.")
+    decide.add_argument(
+        "--symbols",
+        help="Comma-separated symbols. Defaults to strategy.preferred_symbols.",
+    )
+    decide.add_argument(
+        "--max-candidates",
+        type=int,
+        default=5,
+        help="Maximum candidates to pass to the LLM.",
+    )
+    decide.add_argument(
+        "--option-feed",
+        choices=["indicative", "opra"],
+        help="Override Alpaca option data feed for this decision.",
+    )
+    decide.add_argument(
+        "--send-discord",
+        action="store_true",
+        help="Send a Discord LLM decision summary.",
+    )
+    decide.add_argument(
+        "--json-output",
+        help="Optional path to write the full decision artifact JSON.",
+    )
+    decide.add_argument(
+        "--mock-decision",
+        choices=["skip", "disable_trading"],
+        help="Use a local mock decision instead of calling OpenAI.",
+    )
+
     return parser
 
 
@@ -83,6 +117,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_smoke(args)
     if args.command == "scan-options":
         return run_option_scan(args)
+    if args.command == "decide":
+        return run_decision(args)
 
     parser.error(f"Unknown command: {args.command}")
     return 2
@@ -207,6 +243,112 @@ def run_option_scan(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_decision(args: argparse.Namespace) -> int:
+    config, logger, db_path, kill_switch, notifier = bootstrap(args)
+    logger.info("Starting read-only LLM decision run")
+    if kill_switch.is_active():
+        logger.info("Kill switch is active; continuing because decide is read-only")
+
+    try:
+        alpaca = AlpacaClient.from_config(config)
+    except AlpacaCredentialsError as exc:
+        logger.error("%s", exc)
+        return 1
+
+    symbols = _symbols_from_args_or_config(args, config)
+    if not symbols:
+        logger.error("No symbols configured for decision run")
+        return 1
+
+    try:
+        account = alpaca.get_account()
+        clock = alpaca.get_clock()
+        positions = alpaca.get_positions()
+        open_orders = alpaca.get_orders(status="open")
+        scan_result = scan_put_credit_spreads(
+            config=config,
+            alpaca=alpaca,
+            symbols=symbols,
+            max_candidates=args.max_candidates,
+            option_feed=args.option_feed,
+        )
+    except Exception as exc:  # noqa: BLE001 - report broker/API errors cleanly in CLI
+        logger.exception("Decision data collection failed: %s", exc)
+        return 1
+
+    record_option_scan(db_path, mode=config.mode, scan_result=scan_result)
+    packet = build_decision_packet(
+        config=config,
+        account=account,
+        clock=clock,
+        positions=positions,
+        open_orders=open_orders,
+        scan_result=scan_result,
+    )
+    packet_dict = packet.to_dict()
+
+    try:
+        decision, raw_response, model = _get_llm_or_mock_decision(args, config, packet_dict)
+    except OpenAIClientError as exc:
+        logger.error("%s", exc)
+        return 1
+
+    validator_errors = validate_decision_payload(
+        decision,
+        candidate_ids=packet_candidate_ids(scan_result),
+        candidates_by_id=candidate_dicts_by_id(scan_result),
+        allowed_symbols=set(symbols),
+        open_position_symbols={str(position.get("symbol")) for position in positions if position.get("symbol")},
+    )
+    decision_id = record_llm_decision(
+        db_path,
+        created_at=datetime.now(UTC).isoformat(),
+        mode=config.mode,
+        provider="mock" if args.mock_decision else "openai",
+        model=model,
+        prompt_version=str(config.get("decision_engine", "prompt_version", default="put_credit_spread_v1")),
+        packet=packet_dict,
+        response=decision,
+        raw_response=raw_response,
+        validator_errors=validator_errors,
+    )
+
+    if validator_errors:
+        logger.warning("Decision %s rejected by validator: %s", decision_id, "; ".join(validator_errors))
+    else:
+        logger.info("Decision %s accepted by validator", decision_id)
+
+    logger.info(
+        "LLM decision action=%s symbol=%s candidate_id=%s confidence=%s reason=%s",
+        decision.get("action"),
+        decision.get("symbol"),
+        decision.get("candidate_id"),
+        decision.get("confidence"),
+        decision.get("decision_reason"),
+    )
+
+    artifact = {
+        "decision_id": decision_id,
+        "accepted": not validator_errors,
+        "validator_errors": validator_errors,
+        "decision": decision,
+        "packet": packet_dict,
+        "raw_response": raw_response,
+    }
+    if args.json_output:
+        output_path = resolve_path(args.json_output)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(json.dumps(artifact, indent=2, sort_keys=True), encoding="utf-8")
+        logger.info("Wrote decision JSON to %s", output_path)
+
+    if args.send_discord:
+        discord_ok = _send_decision_summary(notifier, decision, validator_errors, scan_result, logger)
+        if not discord_ok:
+            return 1
+
+    return 0
+
+
 def _maybe_send_discord(
     args: argparse.Namespace,
     notifier: DiscordNotifier,
@@ -301,6 +443,92 @@ def _send_scan_summary(notifier: DiscordNotifier, scan_result, logger: logging.L
         return True
 
     logger.error("Discord scan summary failed: %s", result.error)
+    return False
+
+
+def _get_llm_or_mock_decision(
+    args: argparse.Namespace,
+    config,
+    packet_dict: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any], str]:
+    if args.mock_decision:
+        decision = _mock_decision(args.mock_decision)
+        return decision, {"mock": True, "decision": decision}, "mock"
+
+    prompt_version = str(config.get("decision_engine", "prompt_version", default="put_credit_spread_v1"))
+    prompt_text = _load_prompt_text(prompt_version)
+    client = OpenAIClient.from_config(config)
+    decision, raw_response = client.create_trading_decision(
+        prompt_text=prompt_text,
+        decision_packet=packet_dict,
+    )
+    return decision, raw_response, client.model
+
+
+def _load_prompt_text(prompt_version: str) -> str:
+    prompt_path = resolve_path(f"src/trading_bot/llm/prompt_versions/{prompt_version}.md")
+    if not prompt_path.exists():
+        raise OpenAIClientError(f"Prompt version not found: {prompt_version}")
+    return prompt_path.read_text(encoding="utf-8")
+
+
+def _mock_decision(action: str) -> dict[str, Any]:
+    return {
+        "action": action,
+        "symbol": None,
+        "candidate_id": None,
+        "quantity": 0,
+        "limit_price": None,
+        "confidence": 1.0,
+        "decision_reason": f"Mock {action} decision for local validation.",
+        "news_assessment": {
+            "risk_level": "unknown",
+            "sentiment": "unknown",
+            "summary": "Mock decision; news was not evaluated.",
+        },
+        "risk_checklist": {
+            "defined_risk": True,
+            "within_max_loss": True,
+            "liquidity_ok": True,
+            "earnings_ok": True,
+            "no_material_negative_news": False,
+            "market_trend_ok": True,
+        },
+        "exit_plan": {
+            "profit_take_credit_pct": 50,
+            "loss_trigger": "2x initial credit or short put delta above 0.45",
+            "close_before_expiry_days": 3,
+        },
+    }
+
+
+def _send_decision_summary(
+    notifier: DiscordNotifier,
+    decision: dict[str, Any],
+    validator_errors: list[str],
+    scan_result,
+    logger: logging.Logger,
+) -> bool:
+    status = "accepted" if not validator_errors else "rejected"
+    errors = "\n".join(f"- {error}" for error in validator_errors) if validator_errors else "- none"
+    content = (
+        "Read-only LLM decision complete\n"
+        f"Status: {status}\n"
+        f"Symbols: {', '.join(scan_result.symbols)}\n"
+        f"Candidates: {len(scan_result.candidates)}\n"
+        f"Action: {decision.get('action')}\n"
+        f"Symbol: {decision.get('symbol')}\n"
+        f"Candidate: {decision.get('candidate_id')}\n"
+        f"Confidence: {decision.get('confidence')}\n"
+        f"Reason: {decision.get('decision_reason')}\n"
+        f"Validator errors:\n{errors}"
+    )
+    result = notifier.send(content)
+    if result.ok:
+        logger.info("Discord decision summary sent")
+        return True
+
+    logger.error("Discord decision summary failed: %s", result.error)
     return False
 
 

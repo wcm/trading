@@ -70,6 +70,9 @@ market_filters:
 
 decision_engine:
   type: llm
+  provider: openai
+  model: gpt-5.5
+  openai_base_url: https://api.openai.com/v1
   prompt_version: put_credit_spread_v1
   temperature: 0
   allowed_actions:

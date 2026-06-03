@@ -1064,23 +1064,25 @@ Ops:
 - Alpaca Historical News Data: https://docs.alpaca.markets/us/docs/historical-news-data
 - Alpaca Real-time News Stream: https://docs.alpaca.markets/docs/streaming-real-time-news
 - Alpaca Real-time Option Data: https://docs.alpaca.markets/us/docs/real-time-option-data
+- OpenAI Responses API: https://developers.openai.com/api/reference/responses
+- OpenAI Structured Outputs: https://developers.openai.com/api/docs/guides/structured-outputs
 - FINRA Options Overview: https://www.finra.org/investors/investing/investment-products/options
 - OCC Options Disclosure Document: https://www.theocc.com/company-information/documents-and-archives/options-disclosure-document
 
 ## 13. Immediate Next Step
 
-Build the read-only LLM decision pipeline.
+Add missing market/news context to improve read-only LLM decisions.
 
 Recommended next implementation order:
 
-1. Build a decision packet from account, position, market, option candidate, and news context.
-2. Add the strict LLM JSON response schema.
-3. Add validator tests for invalid JSON, unsupported actions, stale data, and unknown candidates.
-4. Ask the LLM to choose `open`, `skip`, `hold`, `close`, or `disable_trading` without placing orders.
-5. Store the full decision packet, prompt version, LLM response, and validator result.
-6. Send a Discord summary for each LLM decision.
+1. Add intraday underlying move calculation.
+2. Add 30-minute 20-period moving average check.
+3. Add stale-data timestamps to the decision packet.
+4. Add earnings-date blocking data.
+5. Add initial news retrieval and news-risk summary.
+6. Re-run read-only LLM decisions and verify the model has enough context to choose between `open` and `skip`.
 
-The next milestone is not order placement. The next milestone is "the LLM can make a structured decision from real paper-market candidates, and the validator can approve or reject that decision while the bot remains read-only."
+The next milestone is still not order placement. The next milestone is "the LLM receives enough real market/news context that a no-trade decision is based on complete filters rather than missing inputs."
 
 ## 14. Execution Progress
 
@@ -1106,7 +1108,15 @@ Completed:
 - Added conservative candidate math using short-leg bid minus long-leg ask.
 - Added scan-run and scan-candidate SQLite tables.
 - Added Discord scan summary support.
+- Added read-only LLM decision command: `uv run trading-bot decide`.
+- Added OpenAI Responses API integration with strict Structured Outputs JSON schema.
+- Added decision packet builder with account, clock, positions, orders, scan candidates, risk limits, and placeholder news context.
+- Added LLM decision persistence with packet, prompt version, response, raw response, validator errors, and accepted/rejected flag.
+- Added LLM decision Discord summary support.
+- Added mock decision mode for local validation without calling OpenAI.
+- Added validator checks for unknown candidates, unsupported actions, positive credit prices, quantity limits, and unsupported symbols.
 - Added unit tests for config loading and put credit spread candidate construction.
+- Added unit tests for LLM decision packet construction and validator rejection paths.
 - Updated paper-mode option data feed to `indicative` because Alpaca returned `OPRA agreement is not signed`.
 - Kept `opra` as the required live-mode target feed before real options execution.
 
@@ -1116,6 +1126,9 @@ Verified:
 - `uv run trading-bot smoke --check-alpaca`
 - `uv run trading-bot scan-options --symbols QQQ --max-candidates 3 --json-output data/last_option_scan.json`
 - `uv run trading-bot scan-options --symbols QQQ --max-candidates 5 --send-discord`
+- `uv run trading-bot decide --symbols QQQ --max-candidates 3 --mock-decision skip --json-output data/last_decision.json`
+- `uv run trading-bot decide --symbols QQQ --max-candidates 2 --json-output data/last_decision_openai.json`
+- `uv run trading-bot decide --symbols QQQ --max-candidates 2 --send-discord`
 - `uv run python -m unittest discover -s tests`
 - `uv run python -m compileall src tests`
 - `git diff --check`
@@ -1126,6 +1139,8 @@ Current known state:
 - Alpaca paper account reported USD 100,000 equity and USD 200,000 buying power.
 - Alpaca paper account currently has zero open positions.
 - Read-only QQQ option scanning works with Alpaca's `indicative` option data feed.
+- Read-only OpenAI LLM decisioning works and returns schema-valid decisions.
+- The latest real LLM decision chose `skip` because the packet did not yet include enough market-trend/news context to justify opening a spread.
 - OPRA is not currently enabled because the OPRA agreement is not signed.
 - No order placement is implemented yet.
 
@@ -1135,3 +1150,5 @@ Recent commits:
 - `070e0d7 Update plan for paper and local-first rollout`
 - `9e98009 Scaffold local paper trading bot`
 - `a03ee93 Add read-only option spread scanner`
+- `e301743 Update plan execution progress`
+- `2e41d99 Add read-only LLM decision pipeline`

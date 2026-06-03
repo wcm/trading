@@ -58,6 +58,23 @@ def init_db(db_path: Path) -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS llm_decisions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                mode TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                model TEXT NOT NULL,
+                prompt_version TEXT NOT NULL,
+                packet_json TEXT NOT NULL,
+                response_json TEXT NOT NULL,
+                raw_response_json TEXT NOT NULL,
+                validator_errors_json TEXT NOT NULL,
+                accepted INTEGER NOT NULL
+            )
+            """
+        )
         conn.commit()
 
 
@@ -126,3 +143,50 @@ def record_option_scan(db_path: Path, *, mode: str, scan_result: Any) -> int:
         )
         conn.commit()
         return scan_run_id
+
+
+def record_llm_decision(
+    db_path: Path,
+    *,
+    created_at: str,
+    mode: str,
+    provider: str,
+    model: str,
+    prompt_version: str,
+    packet: dict[str, Any],
+    response: dict[str, Any],
+    raw_response: dict[str, Any],
+    validator_errors: list[str],
+) -> int:
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO llm_decisions (
+                created_at,
+                mode,
+                provider,
+                model,
+                prompt_version,
+                packet_json,
+                response_json,
+                raw_response_json,
+                validator_errors_json,
+                accepted
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                created_at,
+                mode,
+                provider,
+                model,
+                prompt_version,
+                json.dumps(packet, sort_keys=True),
+                json.dumps(response, sort_keys=True),
+                json.dumps(raw_response, sort_keys=True),
+                json.dumps(validator_errors, sort_keys=True),
+                0 if validator_errors else 1,
+            ),
+        )
+        conn.commit()
+        return int(cursor.lastrowid)

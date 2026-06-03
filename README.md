@@ -55,6 +55,18 @@ uv run trading-bot scan-options --symbols QQQ --max-candidates 5 --send-discord
 
 Paper mode defaults to Alpaca's `indicative` option data feed because OPRA requires a signed agreement/subscription. Live mode should use OPRA before real option execution.
 
+Run a read-only LLM decision from live paper-market candidates:
+
+```bash
+uv run trading-bot decide --symbols QQQ --max-candidates 2 --send-discord
+```
+
+Test the same decision path without calling OpenAI:
+
+```bash
+uv run trading-bot decide --symbols QQQ --max-candidates 2 --mock-decision skip
+```
+
 Run unit tests:
 
 ```bash
