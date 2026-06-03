@@ -31,5 +31,7 @@ def configure_logging(log_dir: Path, *, level: int = logging.INFO) -> logging.Lo
     file_handler.setFormatter(formatter)
     root.addHandler(file_handler)
 
-    return logging.getLogger("trading_bot")
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
 
+    return logging.getLogger("trading_bot")

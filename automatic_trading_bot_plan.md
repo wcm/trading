@@ -931,7 +931,9 @@ alpaca:
   data_base_url: https://data.alpaca.markets
   active_trading_base_url: https://paper-api.alpaca.markets
   require_options_level: 3
-  option_data_feed: opra
+  option_data_feed: indicative
+  live_option_data_feed: opra
+  stock_data_feed: iex
   allow_indicative_feed_for_live: false
   use_mleg_orders: true
   credit_limit_price_must_be_negative: true

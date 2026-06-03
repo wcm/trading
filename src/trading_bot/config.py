@@ -42,7 +42,7 @@ def resolve_path(path_value: str | Path, *, base: Path | None = None) -> Path:
     path = Path(path_value).expanduser()
     if path.is_absolute():
         return path
-    return (base or project_root() / path).resolve()
+    return ((base or project_root()) / path).resolve()
 
 
 def load_env_file(path: str | Path = ".env") -> int:
@@ -87,4 +87,3 @@ def first_env(*names: str) -> str | None:
         if value:
             return value
     return None
-

@@ -47,6 +47,14 @@ Check Alpaca paper account connectivity:
 uv run trading-bot smoke --check-alpaca
 ```
 
+Run a read-only QQQ put credit spread scan:
+
+```bash
+uv run trading-bot scan-options --symbols QQQ --max-candidates 5 --send-discord
+```
+
+Paper mode defaults to Alpaca's `indicative` option data feed because OPRA requires a signed agreement/subscription. Live mode should use OPRA before real option execution.
+
 Run unit tests:
 
 ```bash
