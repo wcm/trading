@@ -1,16 +1,17 @@
 # Automatic Options Trading Bot MVP Plan
 
-Date: 2026-06-02  
+Date: 2026-06-03
 Status: Working plan, intended to guide the first implementation
 
 ## 1. Objective
 
-Build an automatic trading bot that can trade a small live account using a simple, bounded-risk options strategy. The first goal is not to build the perfect trading system. The first goal is to get a controlled v1 running quickly, with enough logging, alerts, and risk controls that we can learn from real execution without accidentally creating catastrophic exposure.
+Build an automatic trading bot that can first run in paper trading, then graduate to a small live account using a simple, bounded-risk options strategy. The first goal is not to build the perfect trading system. The first goal is to get a controlled v1 running quickly, with enough logging, alerts, and risk controls that we can learn from realistic execution before risking capital.
 
-Target account size: USD 10,000  
-Initial mode: Live trading, tiny size  
-Primary broker target: Alpaca  
-Fallback/alternative broker: none for v1  
+Target live account size: USD 10,000
+Initial mode: Paper trading
+Live mode: later, after paper-trading promotion criteria are met
+Primary broker target: Alpaca
+Fallback/alternative broker: none for v1
 Notification target: Discord first, WhatsApp later if needed
 
 Important note: this is an engineering and research plan, not financial advice. Options are risky, and automated trading can lose money quickly. The plan intentionally restricts the bot to defined-risk trades first.
@@ -26,16 +27,23 @@ Reasons:
 - Alpaca is API-first and simpler to integrate.
 - Alpaca supports live options trading and multi-leg options orders.
 - Alpaca supports `order_class: "mleg"` for multi-leg option orders, which is important for spreads.
-- Alpaca has paper and live environments, even though we plan to go live quickly.
+- Alpaca has paper and live environments, which lets us build the real execution flow without placing live orders first.
 
 Required Alpaca setup:
+
+- Alpaca account.
+- Paper trading API keys.
+- Paper account configured to simulate USD 10,000 starting capital if possible.
+- Market data access suitable for options scanning.
+- Discord webhook for notifications.
+
+Required before live promotion:
 
 - Live Alpaca brokerage account.
 - Live API keys.
 - Options trading enabled.
 - Options approval at Level 3, because the first strategy uses multi-leg spreads.
-- Market data access suitable for options trading.
-- Discord webhook for notifications.
+- Market data access suitable for live options trading, preferably OPRA.
 
 Alpaca options levels relevant to us:
 
@@ -62,6 +70,7 @@ Market data note:
 - Alpaca Basic includes limited real-time data: IEX for equities and the indicative feed for options.
 - Alpaca Algo Trader Plus includes broader equity coverage and OPRA options data.
 - For live options trading, OPRA data is strongly preferred because option execution depends heavily on accurate bid/ask quotes.
+- Paper trading can start before OPRA if necessary, but the bot should record which feed was used for every decision.
 - If we start without OPRA, the bot must be more conservative: fewer trades, wider stale-data blocks, and stricter quote checks.
 
 Order rules specific to Alpaca:
@@ -135,13 +144,23 @@ Why not naked options in v1:
 
 ### Notifications
 
-Use Discord first.
+Use Discord first. Discord notifications are a required v1 dependency, not an optional extra.
 
 Reasons:
 
 - Discord webhooks are simple.
 - No phone-number or business account setup.
 - Easy to post structured trade alerts, P&L updates, and error alerts.
+- Fast enough for paper-trading supervision and later live-trading safety alerts.
+
+Required Discord setup:
+
+- Create a dedicated Discord channel for the bot.
+- Create a Discord webhook for that channel.
+- Store the webhook URL in `DISCORD_WEBHOOK_URL`.
+- Send a startup heartbeat whenever the bot starts.
+- Send a message for every candidate, LLM decision, order submit, order cancel, fill, close, rejected decision, risk alert, error, and daily summary.
+- If Discord notifications fail repeatedly, the bot must stop opening new trades.
 
 WhatsApp can be added later through Twilio or WhatsApp Business API.
 
@@ -230,7 +249,7 @@ The LLM decision schema should be strict.
 }
 ```
 
-The prompt should instruct the LLM to be conservative when information is ambiguous. Because the account is live, "no trade" is always a valid decision.
+The prompt should instruct the LLM to be conservative when information is ambiguous. Even in paper mode, "no trade" is always a valid decision.
 
 ## 3. V1 Strategy Specification
 
@@ -566,17 +585,39 @@ Example skipped-trade log:
 
 ### Local First
 
-Build and test locally first.
+Build and run locally first. The initial bot should run on the user's computer in paper mode.
 
 Reasons:
 
 - Faster iteration.
 - Easier debugging.
 - No cloud secrets or deployment complexity during initial build.
+- Easy to inspect logs, SQLite data, Alpaca responses, LLM decisions, and Discord messages.
+- Easy to stop the process manually while behavior is still being shaped.
+
+Local paper mode should still behave like production:
+
+- `mode: paper`.
+- Alpaca paper endpoint.
+- Discord notifications required.
+- SQLite trade journal.
+- Structured logs.
+- Kill switch file.
+- One-paper-trade limit at first.
+- Same LLM decision schema and same validator intended for live mode.
+
+The local stage is complete when:
+
+- The bot can run a full read-only loop.
+- The bot can generate candidates.
+- The LLM can make schema-valid decisions.
+- The validator can reject bad decisions.
+- Discord receives startup, decision, risk, and summary messages.
+- At least one full paper trade lifecycle is opened, monitored, notified, logged, and closed.
 
 ### Cloud Deployment
 
-After local smoke test, deploy to a small cloud server.
+After local paper trading is stable, deploy the same bot to a small cloud server in paper mode. Do not move directly from local paper trading to cloud live trading.
 
 Candidate setup:
 
@@ -585,12 +626,34 @@ Candidate setup:
 - Process manager: systemd or Docker restart policy.
 - Secrets: environment variables or cloud secret manager.
 - Logs: local file plus optional log shipping.
+- Persistent storage for SQLite and log files.
+- Manual kill switch file or remote pause command.
 
 Minimum server:
 
 - 1 vCPU.
 - 1 GB RAM.
 - Ubuntu LTS.
+
+Recommended deployment staircase:
+
+1. Local paper read-only.
+2. Local paper with one-trade execution.
+3. Local paper with normal paper limits.
+4. Cloud paper read-only.
+5. Cloud paper with one-trade execution.
+6. Cloud paper with normal paper limits.
+7. Cloud live read-only.
+8. Cloud live with one-trade execution.
+
+Cloud paper mode should run before cloud live mode until:
+
+- Cloud uptime is stable.
+- Discord heartbeat and daily summary are reliable.
+- Restart behavior is safe.
+- No duplicate orders occur after restarts.
+- SQLite/log persistence works across restarts.
+- Kill switch behavior is verified on the server.
 
 ### Monitoring
 
@@ -616,7 +679,7 @@ Discord messages should be concise but complete.
 
 ```text
 Bot started
-Mode: LIVE
+Mode: PAPER
 Broker: Alpaca
 Account equity: 10000.00
 Open risk: 0.00
@@ -666,15 +729,14 @@ New entries disabled
 Manual reset required
 ```
 
-## 8. Backtesting and Dry Runs
+## 8. Paper Trading, Backtesting, and Dry Runs
 
-The user prefers straight-to-live, but we still need minimum engineering validation before placing real orders.
+The first operating mode is paper trading. The paper bot should use the same strategy, LLM decision flow, validator, order construction, logging, alerts, and risk limits intended for live mode. The goal is to make the live switch mostly a broker credential/base-URL change, not a redesign.
 
-Required before live order placement:
+Required before any paper order placement:
 
 - Broker connection works.
 - Account read works.
-- Account options level can be read or manually confirmed as Level 3.
 - Option chain fetch works.
 - Quote data freshness check works.
 - OPRA or indicative feed status is known.
@@ -690,13 +752,35 @@ Required before live order placement:
 
 This can be done quickly, potentially in one evening.
 
-Live rollout:
+Paper rollout:
+
+1. Run in paper-read-only mode for one market session.
+2. Allow one paper trade with 1 spread and simulated max loss under USD 500.
+3. Disable additional entries after first paper fill.
+4. Observe management, fills, exits, logs, and notifications.
+5. Review the full paper trade lifecycle.
+6. Re-enable paper trading with up to 3 open spreads only after the first lifecycle is understood.
+
+Promotion criteria before live mode:
+
+- At least 20 paper trades or 2 full trading weeks, whichever comes first.
+- No unreconciled positions or orders.
+- No duplicate order submissions.
+- No invalid LLM decisions accepted by the validator.
+- No missed exit caused by bot logic.
+- Discord notifications were received for every order, fill, close, risk alert, and daily summary.
+- Paper max drawdown stayed within the configured daily and weekly limits.
+- Live account has Level 3 options approval.
+- Live API keys are configured and tested in read-only mode.
+- OPRA/live options market data decision is made.
+
+Live rollout after promotion:
 
 1. Run in live-read-only mode for one market session.
 2. Allow one live trade with 1 spread and max loss under USD 500.
-3. Disable additional entries after first fill.
-4. Observe management and notifications.
-5. Review logs before allowing multiple positions.
+3. Disable additional live entries after first live fill.
+4. Monitor until closed.
+5. Review logs before allowing multiple live positions.
 
 ## 9. Implementation Phases
 
@@ -705,17 +789,19 @@ Live rollout:
 Tasks:
 
 - Create or confirm Alpaca account.
-- Enable live trading API.
-- Apply for options Level 3.
-- Generate API keys.
+- Generate paper trading API keys.
+- Configure paper account buying power to approximate USD 10,000 if Alpaca allows it.
 - Confirm options market data access.
-- Decide whether to subscribe to Algo Trader Plus / OPRA before live options trading.
 - Create Discord webhook.
+- For later live promotion: enable live trading API.
+- For later live promotion: apply for options Level 3.
+- For later live promotion: generate live API keys.
+- For later live promotion: decide whether to subscribe to Algo Trader Plus / OPRA before live options trading.
 
 Exit criteria:
 
-- We can fetch account info, option contract data, option chain snapshots, quotes, positions, and orders.
-- We have confirmed Level 3 options approval or paused the project until approval is available.
+- In paper mode, we can fetch account info, option contract data, option chain snapshots, quotes, positions, and orders.
+- Live Level 3 approval can remain pending while paper development proceeds.
 
 ### Phase 1: Project Skeleton
 
@@ -781,13 +867,49 @@ Exit criteria:
 
 - Bot can open and close one spread with correct logs and notifications.
 
-### Phase 5: Live Tiny Rollout
+### Phase 5: Paper Trading Rollout
 
 Tasks:
 
-- Enable live mode for one trade only.
+- Enable paper execution mode for one trade only.
+- Simulated max loss under USD 500.
+- Disable further entries after first paper fill.
+- Monitor until closed.
+- Review trade journal.
+
+Exit criteria:
+
+- One complete paper trade lifecycle is recorded and understood.
+
+### Phase 6: Cloud Paper Deployment
+
+Tasks:
+
+- Containerize the bot.
+- Deploy to a small Ubuntu server.
+- Configure paper Alpaca keys, OpenAI key, and Discord webhook as environment variables.
+- Mount persistent storage for SQLite and logs.
+- Configure process restart policy.
+- Verify startup heartbeat.
+- Verify daily summary.
+- Verify kill switch behavior on the server.
+- Run cloud paper read-only before enabling cloud paper execution.
+
+Exit criteria:
+
+- Cloud paper mode runs reliably without missed heartbeats, duplicate orders, or lost logs.
+
+### Phase 7: Live Tiny Rollout
+
+Tasks:
+
+- Confirm live Level 3 options approval.
+- Confirm live API keys and live-read-only access.
+- Confirm market data plan.
+- Run cloud live read-only for one market session.
+- Enable cloud live mode for one trade only.
 - Max loss under USD 500.
-- Disable further entries after first live fill.
+- Disable further live entries after first live fill.
 - Monitor until closed.
 - Review trade journal.
 
@@ -800,13 +922,14 @@ Exit criteria:
 Initial config:
 
 ```yaml
-mode: live
+mode: paper
 broker: alpaca
 
 alpaca:
   trading_base_url: https://api.alpaca.markets
   paper_base_url: https://paper-api.alpaca.markets
   data_base_url: https://data.alpaca.markets
+  active_trading_base_url: https://paper-api.alpaca.markets
   require_options_level: 3
   option_data_feed: opra
   allow_indicative_feed_for_live: false
@@ -815,7 +938,8 @@ alpaca:
   require_client_order_id: true
 
 account:
-  starting_capital: 10000
+  paper_starting_capital: 10000
+  live_starting_capital: 10000
   emergency_equity_floor: 8000
 
 risk:
@@ -825,6 +949,7 @@ risk:
   max_new_trades_per_day: 3
   max_daily_loss: 500
   max_weekly_loss: 1000
+  disable_after_first_paper_trade: true
   disable_after_first_live_trade: true
 
 strategy:
@@ -889,6 +1014,11 @@ execution:
 
 notifications:
   provider: discord
+  webhook_env_var: DISCORD_WEBHOOK_URL
+  required_for_execution: true
+  stop_new_trades_on_repeated_failure: true
+  heartbeat_on_startup: true
+  daily_summary: true
 ```
 
 ## 11. Information Needed From User
@@ -896,14 +1026,17 @@ notifications:
 Broker/account:
 
 - Do you already have an Alpaca account, or do we need to open one?
-- Is live trading enabled?
-- Is options trading approved at Level 3?
-- Are live API keys available?
-- Are you willing to subscribe to Alpaca Algo Trader Plus / OPRA data if Basic only gives indicative options quotes?
+- Are paper trading API keys available?
+- Can the paper account be set to approximately USD 10,000 buying power?
+- Is options trading available in the paper account?
+- For later live promotion: is live trading enabled?
+- For later live promotion: is options trading approved at Level 3?
+- For later live promotion: are live API keys available?
+- For later live promotion: are you willing to subscribe to Alpaca Algo Trader Plus / OPRA data if Basic only gives indicative options quotes?
 
 Trading preferences:
 
-- Are you comfortable with max loss of about USD 400-500 on the first live trade?
+- Are you comfortable simulating max loss of about USD 400-500 on the first paper trade?
 - Should the bot be allowed to trade QQQ first, or only individual tech stocks?
 - Should TSLA and NVDA be disabled for the first week because of volatility?
 
@@ -914,8 +1047,10 @@ Notifications:
 
 Ops:
 
-- Should v1 run on your laptop first, then cloud?
-- Preferred cloud provider if any.
+- v1 should run locally on the user's computer first.
+- Later, choose a cloud provider for cloud paper trading.
+- Preferred cloud provider, if any.
+- Whether the cloud deployment should use Docker plus systemd, or Docker Compose.
 
 ## 12. Source References
 
@@ -932,17 +1067,18 @@ Ops:
 
 ## 13. Immediate Next Step
 
-Create the project skeleton and implement Alpaca read-only connectivity, Discord notifications, and the first LLM decision pipeline.
+Create the project skeleton locally and implement Alpaca paper connectivity, Discord notifications, and the first LLM decision pipeline.
 
 Recommended next implementation order:
 
 1. Create Python package structure.
 2. Add config and `.env` handling.
 3. Add Discord webhook notifier.
-4. Add Alpaca account/clock/positions connection.
+4. Add Alpaca paper account/clock/positions connection.
 5. Add read-only options chain scanner.
 6. Add LLM decision packet, prompt, and JSON schema.
 7. Add validator/risk engine that can reject bad LLM decisions.
-8. Add one-trade live execution mode.
+8. Run local paper read-only mode.
+9. Add one-trade local paper execution mode.
 
-The first milestone is not "make money". The first milestone is "the LLM can make a structured trading decision, the validator can approve or reject it, and one tiny live spread can be opened, monitored, logged, notified, and closed without the bot doing anything uncontrolled."
+The first milestone is not "make money". The first milestone is "the LLM can make a structured trading decision, the validator can approve or reject it, and one tiny paper spread can be opened, monitored, logged, notified, and closed without the bot doing anything uncontrolled."
