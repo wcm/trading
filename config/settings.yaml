@@ -1,0 +1,105 @@
+mode: paper
+broker: alpaca
+
+alpaca:
+  trading_base_url: https://api.alpaca.markets
+  paper_base_url: https://paper-api.alpaca.markets
+  data_base_url: https://data.alpaca.markets
+  active_trading_base_url: https://paper-api.alpaca.markets
+  require_options_level: 3
+  option_data_feed: opra
+  allow_indicative_feed_for_live: false
+  use_mleg_orders: true
+  credit_limit_price_must_be_negative: true
+  require_client_order_id: true
+
+account:
+  paper_starting_capital: 10000
+  live_starting_capital: 10000
+  emergency_equity_floor: 8000
+
+risk:
+  max_loss_per_trade: 500
+  max_open_risk: 1500
+  max_open_positions: 3
+  max_new_trades_per_day: 3
+  max_daily_loss: 500
+  max_weekly_loss: 1000
+  disable_after_first_paper_trade: true
+  disable_after_first_live_trade: true
+
+strategy:
+  name: put_credit_spread
+  watchlist:
+    - QQQ
+    - AAPL
+    - MSFT
+    - NVDA
+    - AMZN
+    - META
+    - GOOGL
+    - TSLA
+  preferred_symbols:
+    - QQQ
+    - AAPL
+    - MSFT
+  min_dte: 7
+  max_dte: 21
+  short_put_delta_min: -0.30
+  short_put_delta_max: -0.20
+  spread_widths:
+    - 5
+    - 10
+  min_credit_as_width_pct: 0.20
+  close_profit_pct: 0.50
+  close_before_expiry_days: 3
+
+liquidity:
+  min_short_leg_open_interest: 500
+  min_long_leg_open_interest: 100
+  min_short_leg_bid: 0.30
+  max_leg_spread_pct_of_mid: 0.15
+  max_leg_spread_absolute: 0.20
+
+market_filters:
+  block_if_underlying_down_intraday_pct: 2.5
+  require_above_30m_ma_period: 20
+  block_earnings_within_days: 7
+
+decision_engine:
+  type: llm
+  prompt_version: put_credit_spread_v1
+  temperature: 0
+  allowed_actions:
+    - open
+    - close
+    - hold
+    - skip
+    - disable_trading
+  require_json_schema: true
+  reject_invalid_json: true
+  reject_candidates_not_generated_by_code: true
+  log_full_decision_packet: true
+  allow_no_trade_decision: true
+
+execution:
+  order_type: limit
+  entry_order_timeout_seconds: 60
+  max_entry_price_adjustments: 3
+  no_market_orders: true
+
+notifications:
+  provider: discord
+  webhook_env_var: DISCORD_WEBHOOK_URL
+  required_for_execution: true
+  stop_new_trades_on_repeated_failure: true
+  heartbeat_on_startup: true
+  daily_summary: true
+
+storage:
+  sqlite_path: data/trading_bot.sqlite3
+
+runtime:
+  kill_switch_path: KILL_SWITCH
+  log_dir: logs
+
