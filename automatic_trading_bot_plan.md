@@ -1069,18 +1069,69 @@ Ops:
 
 ## 13. Immediate Next Step
 
-Create the project skeleton locally and implement Alpaca paper connectivity, Discord notifications, and the first LLM decision pipeline.
+Build the read-only LLM decision pipeline.
 
 Recommended next implementation order:
 
-1. Create Python package structure.
-2. Add config and `.env` handling.
-3. Add Discord webhook notifier.
-4. Add Alpaca paper account/clock/positions connection.
-5. Add read-only options chain scanner.
-6. Add LLM decision packet, prompt, and JSON schema.
-7. Add validator/risk engine that can reject bad LLM decisions.
-8. Run local paper read-only mode.
-9. Add one-trade local paper execution mode.
+1. Build a decision packet from account, position, market, option candidate, and news context.
+2. Add the strict LLM JSON response schema.
+3. Add validator tests for invalid JSON, unsupported actions, stale data, and unknown candidates.
+4. Ask the LLM to choose `open`, `skip`, `hold`, `close`, or `disable_trading` without placing orders.
+5. Store the full decision packet, prompt version, LLM response, and validator result.
+6. Send a Discord summary for each LLM decision.
 
-The first milestone is not "make money". The first milestone is "the LLM can make a structured trading decision, the validator can approve or reject it, and one tiny paper spread can be opened, monitored, logged, notified, and closed without the bot doing anything uncontrolled."
+The next milestone is not order placement. The next milestone is "the LLM can make a structured decision from real paper-market candidates, and the validator can approve or reject that decision while the bot remains read-only."
+
+## 14. Execution Progress
+
+Last updated: 2026-06-04
+
+Completed:
+
+- Initialized Git repository and pushed it to `https://github.com/wcm/trading.git`.
+- Created the working plan file: `automatic_trading_bot_plan.md`.
+- Updated the plan to use Alpaca only for v1.
+- Updated the plan to start with paper trading, not live trading.
+- Updated the plan to run locally first, then cloud paper, then cloud live.
+- Created local Python project scaffold with `uv`.
+- Added `config/settings.yaml` with paper-mode defaults.
+- Added `config/secrets.example.env` and a local ignored `.env`.
+- Added `.gitignore` so secrets, logs, SQLite DBs, scan JSON, and virtualenv files are not committed.
+- Added local boot/smoke CLI: `uv run trading-bot smoke`.
+- Added Discord webhook notifier.
+- Added Alpaca paper read-only client for account, clock, positions, orders, stock bars, option contracts, and option snapshots.
+- Added kill switch detection.
+- Added SQLite initialization and bot-run logging.
+- Added read-only put credit spread scanner: `uv run trading-bot scan-options`.
+- Added conservative candidate math using short-leg bid minus long-leg ask.
+- Added scan-run and scan-candidate SQLite tables.
+- Added Discord scan summary support.
+- Added unit tests for config loading and put credit spread candidate construction.
+- Updated paper-mode option data feed to `indicative` because Alpaca returned `OPRA agreement is not signed`.
+- Kept `opra` as the required live-mode target feed before real options execution.
+
+Verified:
+
+- `uv run trading-bot smoke`
+- `uv run trading-bot smoke --check-alpaca`
+- `uv run trading-bot scan-options --symbols QQQ --max-candidates 3 --json-output data/last_option_scan.json`
+- `uv run trading-bot scan-options --symbols QQQ --max-candidates 5 --send-discord`
+- `uv run python -m unittest discover -s tests`
+- `uv run python -m compileall src tests`
+- `git diff --check`
+
+Current known state:
+
+- Alpaca paper account is reachable and active.
+- Alpaca paper account reported USD 100,000 equity and USD 200,000 buying power.
+- Alpaca paper account currently has zero open positions.
+- Read-only QQQ option scanning works with Alpaca's `indicative` option data feed.
+- OPRA is not currently enabled because the OPRA agreement is not signed.
+- No order placement is implemented yet.
+
+Recent commits:
+
+- `79e6b63 Add trading bot MVP plan`
+- `070e0d7 Update plan for paper and local-first rollout`
+- `9e98009 Scaffold local paper trading bot`
+- `a03ee93 Add read-only option spread scanner`
