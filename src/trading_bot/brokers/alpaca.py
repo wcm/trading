@@ -71,6 +71,45 @@ class AlpacaClient:
             raise BrokerError("Expected Alpaca latest bars response to contain a bars mapping")
         return bars
 
+    def get_stock_bars(
+        self,
+        symbols: list[str],
+        *,
+        timeframe: str,
+        start: str,
+        end: str | None = None,
+        feed: str = "iex",
+        limit: int = 10_000,
+        sort: str = "asc",
+    ) -> dict[str, list[dict[str, Any]]]:
+        params = {
+            "symbols": ",".join(symbols),
+            "timeframe": timeframe,
+            "start": start,
+            "feed": feed,
+            "limit": str(limit),
+            "sort": sort,
+        }
+        if end:
+            params["end"] = end
+
+        bars_by_symbol: dict[str, list[dict[str, Any]]] = {}
+        page_token: str | None = None
+        while True:
+            request_params = dict(params)
+            if page_token:
+                request_params["page_token"] = page_token
+            data = self._get_data("/v2/stocks/bars", params=request_params)
+            page_bars = data.get("bars", {})
+            if not isinstance(page_bars, dict):
+                raise BrokerError("Expected Alpaca stock bars response to contain a bars mapping")
+            for symbol, bars in page_bars.items():
+                if isinstance(bars, list):
+                    bars_by_symbol.setdefault(symbol, []).extend(bars)
+            page_token = data.get("next_page_token")
+            if not page_token:
+                return bars_by_symbol
+
     def get_option_contracts(
         self,
         *,
@@ -123,6 +162,31 @@ class AlpacaClient:
                 raise BrokerError("Expected Alpaca option snapshots response to contain a snapshots mapping")
             snapshots.update(page_snapshots)
         return snapshots
+
+    def get_news(
+        self,
+        symbols: list[str],
+        *,
+        start: str,
+        end: str | None = None,
+        limit: int = 10,
+        include_content: bool = False,
+        sort: str = "desc",
+    ) -> list[dict[str, Any]]:
+        params = {
+            "symbols": ",".join(symbols),
+            "start": start,
+            "limit": str(limit),
+            "include_content": str(include_content).lower(),
+            "sort": sort,
+        }
+        if end:
+            params["end"] = end
+        data = self._get_data("/v1beta1/news", params=params)
+        news = data.get("news", [])
+        if not isinstance(news, list):
+            raise BrokerError("Expected Alpaca news response to contain a news list")
+        return news
 
     def _get(self, path: str, params: dict[str, str] | None = None) -> Any:
         return self._request("GET", f"{self.base_url}{path}", params=params)

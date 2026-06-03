@@ -21,6 +21,8 @@ class OptionLeg:
     bid: Decimal
     ask: Decimal
     mid: Decimal
+    quote_time: datetime | None
+    quote_age_seconds: int | None
     delta: Decimal | None
     gamma: Decimal | None
     theta: Decimal | None
@@ -44,6 +46,9 @@ class PutCreditSpreadCandidate:
     max_loss: str
     short_delta: str | None
     long_delta: str | None
+    short_quote_time: str | None
+    long_quote_time: str | None
+    max_quote_age_seconds: int | None
     quantity: int = 1
 
     def to_dict(self) -> dict[str, Any]:
@@ -110,7 +115,7 @@ def scan_put_credit_spreads(
     legs_by_underlying_expiration_strike: dict[tuple[str, date, Decimal], OptionLeg] = {}
     warnings: list[str] = []
     for contract in valid_contracts:
-        leg = _build_leg(contract, snapshots.get(str(contract.get("symbol"))))
+        leg = _build_leg(contract, snapshots.get(str(contract.get("symbol"))), now=now)
         if not leg:
             continue
         key = (str(contract.get("underlying_symbol")), leg.expiration_date, leg.strike)
@@ -162,6 +167,12 @@ def scan_put_credit_spreads(
                     max_loss=_fmt_decimal(max_loss),
                     short_delta=_fmt_optional_decimal(short_leg.delta),
                     long_delta=_fmt_optional_decimal(long_leg.delta),
+                    short_quote_time=short_leg.quote_time.isoformat() if short_leg.quote_time else None,
+                    long_quote_time=long_leg.quote_time.isoformat() if long_leg.quote_time else None,
+                    max_quote_age_seconds=_max_optional_int(
+                        short_leg.quote_age_seconds,
+                        long_leg.quote_age_seconds,
+                    ),
                 )
             )
 
@@ -192,7 +203,7 @@ def _is_tradable_put(contract: dict[str, Any]) -> bool:
     )
 
 
-def _build_leg(contract: dict[str, Any], snapshot: dict[str, Any] | None) -> OptionLeg | None:
+def _build_leg(contract: dict[str, Any], snapshot: dict[str, Any] | None, *, now: datetime) -> OptionLeg | None:
     if not snapshot:
         return None
 
@@ -211,6 +222,9 @@ def _build_leg(contract: dict[str, Any], snapshot: dict[str, Any] | None) -> Opt
     except ValueError:
         return None
 
+    quote_time = _parse_time(_nested_get(quote, "t", "timestamp"))
+    quote_age_seconds = _age_seconds(now, quote_time)
+
     return OptionLeg(
         symbol=str(contract["symbol"]),
         strike=strike,
@@ -218,6 +232,8 @@ def _build_leg(contract: dict[str, Any], snapshot: dict[str, Any] | None) -> Opt
         bid=bid,
         ask=ask,
         mid=(bid + ask) / Decimal("2"),
+        quote_time=quote_time,
+        quote_age_seconds=quote_age_seconds,
         delta=_decimal_or_none(_nested_get(greeks, "delta")),
         gamma=_decimal_or_none(_nested_get(greeks, "gamma")),
         theta=_decimal_or_none(_nested_get(greeks, "theta")),
@@ -239,6 +255,34 @@ def _decimal_or_none(value: Any) -> Decimal | None:
         return Decimal(str(value))
     except (InvalidOperation, ValueError):
         return None
+
+
+def _parse_time(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _age_seconds(now: datetime, timestamp: datetime | None) -> int | None:
+    if timestamp is None:
+        return None
+    age = int((now - timestamp).total_seconds())
+    if -60 <= age < 0:
+        return 0
+    return age
+
+
+def _max_optional_int(*values: int | None) -> int | None:
+    present = [value for value in values if value is not None]
+    if not present:
+        return None
+    return max(present)
 
 
 def _fmt_optional_decimal(value: Decimal | None) -> str | None:

@@ -1061,7 +1061,9 @@ Ops:
 - Alpaca Create Order API Reference: https://docs.alpaca.markets/us/reference/postorder
 - Alpaca Option Chain API Reference: https://docs.alpaca.markets/us/reference/optionchain
 - Alpaca Market Data API: https://docs.alpaca.markets/us/docs/about-market-data-api
+- Alpaca Historical Stock Bars API: https://docs.alpaca.markets/reference/stockbars
 - Alpaca Historical News Data: https://docs.alpaca.markets/us/docs/historical-news-data
+- Alpaca News Articles API: https://docs.alpaca.markets/reference/news-3
 - Alpaca Real-time News Stream: https://docs.alpaca.markets/docs/streaming-real-time-news
 - Alpaca Real-time Option Data: https://docs.alpaca.markets/us/docs/real-time-option-data
 - OpenAI Responses API: https://developers.openai.com/api/reference/responses
@@ -1071,18 +1073,17 @@ Ops:
 
 ## 13. Immediate Next Step
 
-Add missing market/news context to improve read-only LLM decisions.
+Add earnings/event filtering and a read-only order preview.
 
 Recommended next implementation order:
 
-1. Add intraday underlying move calculation.
-2. Add 30-minute 20-period moving average check.
-3. Add stale-data timestamps to the decision packet.
-4. Add earnings-date blocking data.
-5. Add initial news retrieval and news-risk summary.
-6. Re-run read-only LLM decisions and verify the model has enough context to choose between `open` and `skip`.
+1. Add earnings-date blocking data.
+2. Add scheduled macro-event placeholders for CPI, FOMC, and major jobs reports.
+3. Add read-only Alpaca MLeg order payload preview for accepted `open` decisions.
+4. Add validator tests that accepted `open` decisions produce valid but unsubmitted Alpaca payloads.
+5. Keep actual order submission disabled.
 
-The next milestone is still not order placement. The next milestone is "the LLM receives enough real market/news context that a no-trade decision is based on complete filters rather than missing inputs."
+The next milestone is still not order placement. The next milestone is "an accepted LLM `open` decision can produce a valid Alpaca multi-leg order preview, while the bot remains unable to submit it."
 
 ## 14. Execution Progress
 
@@ -1115,8 +1116,17 @@ Completed:
 - Added LLM decision Discord summary support.
 - Added mock decision mode for local validation without calling OpenAI.
 - Added validator checks for unknown candidates, unsupported actions, positive credit prices, quantity limits, and unsupported symbols.
+- Added Alpaca historical stock bar retrieval.
+- Added intraday move calculation.
+- Added 30-minute 20-period moving average market-trend context.
+- Added market-data freshness checks.
+- Added Alpaca recent-news retrieval.
+- Added recent-news context to the LLM decision packet.
+- Added option quote timestamps and quote-age data to spread candidates.
+- Added hard validator checks for failed market trend, stale market bars, stale/unavailable option quotes, symbol mismatch, and max-loss limit.
 - Added unit tests for config loading and put credit spread candidate construction.
 - Added unit tests for LLM decision packet construction and validator rejection paths.
+- Added unit test for stale market data blocking `market_trend_ok`.
 - Updated paper-mode option data feed to `indicative` because Alpaca returned `OPRA agreement is not signed`.
 - Kept `opra` as the required live-mode target feed before real options execution.
 
@@ -1140,7 +1150,10 @@ Current known state:
 - Alpaca paper account currently has zero open positions.
 - Read-only QQQ option scanning works with Alpaca's `indicative` option data feed.
 - Read-only OpenAI LLM decisioning works and returns schema-valid decisions.
-- The latest real LLM decision chose `skip` because the packet did not yet include enough market-trend/news context to justify opening a spread.
+- The latest real LLM decision chose `skip` because QQQ failed the 30-minute moving-average market-trend filter.
+- Recent Alpaca/Benzinga news retrieval works and is included in the LLM packet.
+- Quote freshness is included in spread candidates and enforced by the validator for `open` decisions.
+- Earnings-date filtering is still not implemented.
 - OPRA is not currently enabled because the OPRA agreement is not signed.
 - No order placement is implemented yet.
 
@@ -1155,3 +1168,4 @@ Recent commits:
 Latest milestone:
 
 - Add read-only LLM decision pipeline
+- Add market/news context and hard freshness gates

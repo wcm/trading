@@ -61,6 +61,10 @@ Run a read-only LLM decision from live paper-market candidates:
 uv run trading-bot decide --symbols QQQ --max-candidates 2 --send-discord
 ```
 
+The decision packet includes account/position/order state, option candidates,
+intraday move, 30-minute moving-average trend context, option quote freshness,
+and recent Alpaca/Benzinga news.
+
 Test the same decision path without calling OpenAI:
 
 ```bash

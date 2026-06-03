@@ -9,6 +9,8 @@ from typing import Any
 
 from trading_bot.brokers.alpaca import AlpacaClient, AlpacaCredentialsError
 from trading_bot.config import load_config, load_env_file, resolve_path
+from trading_bot.data.market_data import build_market_context
+from trading_bot.data.news import build_news_context
 from trading_bot.llm.decision import build_decision_packet, candidate_dicts_by_id, packet_candidate_ids
 from trading_bot.llm.openai_client import OpenAIClient, OpenAIClientError
 from trading_bot.llm.schemas import validate_decision_payload
@@ -265,6 +267,8 @@ def run_decision(args: argparse.Namespace) -> int:
         clock = alpaca.get_clock()
         positions = alpaca.get_positions()
         open_orders = alpaca.get_orders(status="open")
+        market_context = build_market_context(config=config, alpaca=alpaca, symbols=symbols)
+        news_context = build_news_context(config=config, alpaca=alpaca, symbols=symbols)
         scan_result = scan_put_credit_spreads(
             config=config,
             alpaca=alpaca,
@@ -284,6 +288,8 @@ def run_decision(args: argparse.Namespace) -> int:
         positions=positions,
         open_orders=open_orders,
         scan_result=scan_result,
+        market_context=market_context,
+        news_context=news_context,
     )
     packet_dict = packet.to_dict()
 
@@ -299,6 +305,12 @@ def run_decision(args: argparse.Namespace) -> int:
         candidates_by_id=candidate_dicts_by_id(scan_result),
         allowed_symbols=set(symbols),
         open_position_symbols={str(position.get("symbol")) for position in positions if position.get("symbol")},
+        market_context_by_symbol=packet_dict["market_context"]["symbols"],
+        max_loss_per_trade=config.get("risk", "max_loss_per_trade"),
+        max_option_quote_age_seconds=int(
+            config.get("market_filters", "max_option_quote_age_minutes", default=30)
+        )
+        * 60,
     )
     decision_id = record_llm_decision(
         db_path,

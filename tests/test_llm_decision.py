@@ -3,6 +3,8 @@ from __future__ import annotations
 import unittest
 
 from trading_bot.config import load_config
+from trading_bot.data.market_data import build_market_context
+from trading_bot.data.news import build_news_context
 from trading_bot.llm.decision import build_decision_packet, candidate_dicts_by_id, packet_candidate_ids
 from trading_bot.llm.schemas import validate_decision_payload
 from trading_bot.strategy.put_credit_spread import scan_put_credit_spreads
@@ -49,6 +51,8 @@ class LlmDecisionTests(unittest.TestCase):
             max_candidates=5,
             option_feed="indicative",
         )
+        market_context = build_market_context(config=config, alpaca=FakeAlpacaClient(), symbols=["AAPL"])
+        news_context = build_news_context(config=config, alpaca=FakeAlpacaClient(), symbols=["AAPL"])
         packet = build_decision_packet(
             config=config,
             account={"status": "ACTIVE", "equity": "100000", "buying_power": "200000"},
@@ -56,11 +60,15 @@ class LlmDecisionTests(unittest.TestCase):
             positions=[],
             open_orders=[],
             scan_result=scan,
+            market_context=market_context,
+            news_context=news_context,
         )
 
         packet_dict = packet.to_dict()
         self.assertEqual(packet_dict["mode"], "paper")
         self.assertEqual(packet_dict["instructions"]["must_choose_from_candidate_ids"], [scan.candidates[0].candidate_id])
+        self.assertIn("market_context", packet_dict)
+        self.assertIn("news_context", packet_dict)
 
     def test_validator_accepts_skip_decision(self) -> None:
         errors = validate_decision_payload(valid_skip_decision(), allowed_symbols={"AAPL"})
@@ -115,7 +123,43 @@ class LlmDecisionTests(unittest.TestCase):
         )
         self.assertTrue(any("must be negative" in error for error in errors))
 
+    def test_validator_rejects_open_when_market_trend_fails(self) -> None:
+        config = load_config("config/settings.yaml")
+        scan = scan_put_credit_spreads(
+            config=config,
+            alpaca=FakeAlpacaClient(),
+            symbols=["AAPL"],
+            max_candidates=5,
+            option_feed="indicative",
+        )
+        candidate = scan.candidates[0]
+        decision = valid_skip_decision()
+        decision.update(
+            {
+                "action": "open",
+                "symbol": "AAPL",
+                "candidate_id": candidate.candidate_id,
+                "quantity": 1,
+                "limit_price": "-1.00",
+            }
+        )
+
+        errors = validate_decision_payload(
+            decision,
+            candidate_ids=packet_candidate_ids(scan),
+            candidates_by_id=candidate_dicts_by_id(scan),
+            allowed_symbols={"AAPL"},
+            market_context_by_symbol={
+                "AAPL": {
+                    "latest_bar_fresh": True,
+                    "market_trend_ok": False,
+                }
+            },
+            max_loss_per_trade="500",
+            max_option_quote_age_seconds=86_400,
+        )
+        self.assertTrue(any("Market trend filter is not passing" in error for error in errors))
+
 
 if __name__ == "__main__":
     unittest.main()
-

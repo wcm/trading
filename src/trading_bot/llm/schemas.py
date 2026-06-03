@@ -82,6 +82,9 @@ def validate_decision_payload(
     candidates_by_id: dict[str, dict[str, Any]] | None = None,
     allowed_symbols: set[str] | None = None,
     open_position_symbols: set[str] | None = None,
+    market_context_by_symbol: dict[str, dict[str, Any]] | None = None,
+    max_loss_per_trade: str | int | float | None = None,
+    max_option_quote_age_seconds: int | None = None,
 ) -> list[str]:
     errors: list[str] = []
 
@@ -119,6 +122,14 @@ def validate_decision_payload(
         if quantity != 1:
             errors.append("Open decision must use quantity 1 in v1")
         _validate_open_limit_price(payload, candidates_by_id, errors)
+        _validate_open_candidate_context(
+            payload,
+            candidates_by_id,
+            market_context_by_symbol,
+            max_loss_per_trade,
+            max_option_quote_age_seconds,
+            errors,
+        )
     elif quantity not in (0, None):
         errors.append(f"{action} decision must use quantity 0")
 
@@ -167,6 +178,57 @@ def _validate_open_limit_price(
         )
 
 
+def _validate_open_candidate_context(
+    payload: dict[str, Any],
+    candidates_by_id: dict[str, dict[str, Any]] | None,
+    market_context_by_symbol: dict[str, dict[str, Any]] | None,
+    max_loss_per_trade: str | int | float | None,
+    max_option_quote_age_seconds: int | None,
+    errors: list[str],
+) -> None:
+    candidate_id = payload.get("candidate_id")
+    if candidates_by_id is None or candidate_id not in candidates_by_id:
+        return
+
+    candidate = candidates_by_id[candidate_id]
+    candidate_symbol = candidate.get("underlying_symbol")
+    decision_symbol = payload.get("symbol")
+    if decision_symbol and candidate_symbol and decision_symbol != candidate_symbol:
+        errors.append(f"Decision symbol {decision_symbol} does not match candidate symbol {candidate_symbol}")
+
+    if max_loss_per_trade is not None:
+        candidate_max_loss = _decimal_or_none(candidate.get("max_loss"))
+        max_loss = _decimal_or_none(max_loss_per_trade)
+        if candidate_max_loss is None or max_loss is None:
+            errors.append("Could not validate candidate max_loss against risk limit")
+        elif candidate_max_loss > max_loss:
+            errors.append(f"Candidate max_loss {candidate_max_loss} exceeds risk limit {max_loss}")
+
+    max_quote_age = candidate.get("max_quote_age_seconds")
+    if max_option_quote_age_seconds is not None:
+        if not isinstance(max_quote_age, int):
+            errors.append("Candidate option quote age is unavailable")
+        elif max_quote_age < -60:
+            errors.append(f"Candidate option quote timestamp is from the future: age={max_quote_age}")
+        elif max_quote_age > max_option_quote_age_seconds:
+            errors.append(
+                f"Candidate option quote age {max_quote_age}s exceeds limit {max_option_quote_age_seconds}s"
+            )
+
+    if market_context_by_symbol is None or not candidate_symbol:
+        errors.append("Market context is unavailable for open decision")
+        return
+
+    market_context = market_context_by_symbol.get(str(candidate_symbol))
+    if not isinstance(market_context, dict):
+        errors.append(f"Market context is unavailable for {candidate_symbol}")
+        return
+    if market_context.get("latest_bar_fresh") is not True:
+        errors.append(f"Latest market bar is not fresh for {candidate_symbol}")
+    if market_context.get("market_trend_ok") is not True:
+        errors.append(f"Market trend filter is not passing for {candidate_symbol}")
+
+
 def _validate_nested_objects(payload: dict[str, Any], errors: list[str]) -> None:
     news = payload.get("news_assessment")
     if not isinstance(news, dict):
@@ -183,3 +245,12 @@ def _validate_nested_objects(payload: dict[str, Any], errors: list[str]) -> None
     exit_plan = payload.get("exit_plan")
     if not isinstance(exit_plan, dict):
         errors.append("exit_plan must be an object")
+
+
+def _decimal_or_none(value: Any) -> Decimal | None:
+    if value is None:
+        return None
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None

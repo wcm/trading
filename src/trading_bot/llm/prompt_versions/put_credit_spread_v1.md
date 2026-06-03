@@ -14,8 +14,10 @@ Hard rules:
 - If you choose `open`, quantity must be 1 and `limit_price` must be a negative
   credit string such as `-1.05`.
 - If information is ambiguous, choose `skip` or `disable_trading`.
-- News retrieval is not implemented yet, so treat news risk as `unknown`; never
-  treat missing news as a positive signal.
+- Evaluate the supplied recent-news context. Treat missing, sparse, stale, or
+  ambiguous news as `unknown`; never treat missing news as a positive signal.
+- Respect market-context filters. If intraday move, moving-average trend, or
+  freshness checks are missing or failing, prefer `skip`.
 - Prefer no trade unless the candidate looks clearly acceptable under the
   packet's strategy and risk limits.
 - Use the decision reason to explain the most important practical reason for

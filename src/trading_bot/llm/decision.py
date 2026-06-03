@@ -5,6 +5,8 @@ from datetime import UTC, datetime
 from typing import Any
 
 from trading_bot.config import AppConfig
+from trading_bot.data.market_data import MarketContext
+from trading_bot.data.news import NewsContext
 from trading_bot.strategy.put_credit_spread import PutCreditSpreadScanResult
 
 
@@ -20,6 +22,7 @@ class DecisionPacket:
     open_orders: list[dict[str, Any]]
     risk_limits: dict[str, Any]
     market_filters: dict[str, Any]
+    market_context: dict[str, Any]
     option_scan: dict[str, Any]
     news_context: dict[str, Any]
     instructions: dict[str, Any]
@@ -36,6 +39,8 @@ def build_decision_packet(
     positions: list[dict[str, Any]],
     open_orders: list[dict[str, Any]],
     scan_result: PutCreditSpreadScanResult,
+    market_context: MarketContext,
+    news_context: NewsContext,
 ) -> DecisionPacket:
     return DecisionPacket(
         packet_version="put_credit_spread_decision_v1",
@@ -53,12 +58,9 @@ def build_decision_packet(
         open_orders=[_compact_order(order) for order in open_orders],
         risk_limits=config.get("risk", default={}),
         market_filters=config.get("market_filters", default={}),
+        market_context=market_context.to_dict(),
         option_scan=scan_result.to_dict(),
-        news_context={
-            "provider": "none",
-            "items": [],
-            "note": "News retrieval is not implemented yet. Treat news risk as unknown, never positive.",
-        },
+        news_context=news_context.to_dict(),
         instructions={
             "allowed_actions": config.get("decision_engine", "allowed_actions", default=[]),
             "strategy_scope": "put_credit_spread_only",
@@ -127,4 +129,3 @@ def candidate_dicts_by_id(scan_result: PutCreditSpreadScanResult) -> dict[str, d
 
 def packet_candidate_ids(scan_result: PutCreditSpreadScanResult) -> set[str]:
     return set(candidate_dicts_by_id(scan_result))
-

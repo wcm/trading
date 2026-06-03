@@ -67,6 +67,17 @@ market_filters:
   block_if_underlying_down_intraday_pct: 2.5
   require_above_30m_ma_period: 20
   block_earnings_within_days: 7
+  intraday_timeframe: 1Min
+  trend_timeframe: 30Min
+  trend_lookback_days: 14
+  max_bar_age_minutes: 30
+  max_option_quote_age_minutes: 30
+
+news:
+  provider: alpaca
+  lookback_hours: 24
+  limit: 10
+  include_content: false
 
 decision_engine:
   type: llm
