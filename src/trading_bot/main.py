@@ -13,6 +13,7 @@ from trading_bot.config import load_config, load_env_file, resolve_path
 from trading_bot.data.events import build_event_context
 from trading_bot.data.market_data import build_market_context
 from trading_bot.data.news import build_news_context
+from trading_bot.execution.orders import build_client_order_id, build_put_credit_spread_order_preview
 from trading_bot.llm.decision import build_decision_packet, candidate_dicts_by_id, packet_candidate_ids
 from trading_bot.llm.openai_client import OpenAIClient, OpenAIClientError
 from trading_bot.llm.schemas import validate_decision_payload
@@ -341,7 +342,14 @@ def run_decision(args: argparse.Namespace) -> int:
         logger.info("Wrote decision JSON to %s", output_path)
 
     if args.send_discord:
-        discord_ok = _send_decision_summary(notifier, decision, validator_errors, scan_result, logger)
+        discord_ok = _send_decision_summary(
+            notifier,
+            decision,
+            validator_errors,
+            scan_result,
+            artifact.get("order_preview"),
+            logger,
+        )
         if not discord_ok:
             return 1
 
@@ -404,12 +412,14 @@ def run_watchlist_decisions(args: argparse.Namespace) -> int:
 
     successful_decisions = [item for item in per_symbol if item.get("decision")]
     allocation = build_allocation_summary(config, decision_artifacts)
+    selected_order_preview = _selected_order_preview(decision_artifacts, allocation.get("selected_open"))
     combined_artifact = {
         "generated_at": datetime.now(UTC).isoformat(),
         "mode": config.mode,
         "symbols": symbols,
         "per_symbol": per_symbol,
         "allocation": allocation,
+        "selected_order_preview": selected_order_preview,
     }
 
     logger.info(
@@ -623,12 +633,23 @@ def _build_decision_artifact(
         raw_response=raw_response,
         validator_errors=validator_errors,
     )
+    order_preview = None
+    if not validator_errors and decision.get("action") == "open":
+        selected_candidate = _selected_candidate_from_packet(packet_dict, decision.get("candidate_id"))
+        symbol = str(decision.get("symbol") or symbols[0])
+        order_preview = build_put_credit_spread_order_preview(
+            config=config,
+            decision=decision,
+            candidate=selected_candidate,
+            client_order_id=build_client_order_id("preview", symbol, decision_id),
+        )
     return (
         {
             "decision_id": decision_id,
             "accepted": not validator_errors,
             "validator_errors": validator_errors,
             "decision": decision,
+            "order_preview": order_preview,
             "packet": packet_dict,
             "raw_response": raw_response,
         },
@@ -678,6 +699,7 @@ def _send_decision_summary(
     decision: dict[str, Any],
     validator_errors: list[str],
     scan_result,
+    order_preview: dict[str, Any] | None,
     logger: logging.Logger,
 ) -> bool:
     status = "accepted" if not validator_errors else "rejected"
@@ -691,6 +713,7 @@ def _send_decision_summary(
         f"Symbol: {decision.get('symbol')}\n"
         f"Candidate: {decision.get('candidate_id')}\n"
         f"Confidence: {decision.get('confidence')}\n"
+        f"Order preview: {_preview_status(order_preview)}\n"
         f"Reason: {decision.get('decision_reason')}\n"
         f"Validator errors:\n{errors}"
     )
@@ -713,6 +736,7 @@ def _compact_watchlist_artifact(symbol: str, artifact: dict[str, Any]) -> dict[s
         "accepted": artifact["accepted"],
         "validator_errors": artifact["validator_errors"],
         "decision": decision,
+        "order_preview": artifact.get("order_preview"),
         "selected_candidate": selected_candidate,
         "candidate_count": len(packet.get("option_scan", {}).get("candidates", [])),
         "market_context": packet.get("market_context", {}).get("symbols", {}).get(symbol),
@@ -732,6 +756,20 @@ def _selected_candidate_from_packet(packet: dict[str, Any], candidate_id: Any) -
     return None
 
 
+def _selected_order_preview(
+    decision_artifacts: list[dict[str, Any]],
+    selected_open: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not selected_open:
+        return None
+    selected_decision_id = selected_open.get("decision_id")
+    for artifact in decision_artifacts:
+        if artifact.get("decision_id") == selected_decision_id:
+            preview = artifact.get("order_preview")
+            return preview if isinstance(preview, dict) else None
+    return None
+
+
 def _send_watchlist_decision_summary(
     notifier: DiscordNotifier,
     artifact: dict[str, Any],
@@ -739,6 +777,7 @@ def _send_watchlist_decision_summary(
 ) -> bool:
     allocation = artifact["allocation"]
     selected = allocation.get("selected_open")
+    selected_preview = artifact.get("selected_order_preview")
     selected_line = (
         f"{selected['symbol']} {selected['candidate_id']} limit {selected['limit_price']} "
         f"max_loss {selected['max_loss']}"
@@ -760,6 +799,7 @@ def _send_watchlist_decision_summary(
         f"Symbols: {', '.join(artifact['symbols'])}\n"
         f"Accepted opens: {allocation['accepted_open_count']}\n"
         f"Selected open: {selected_line}\n"
+        f"Order preview: {_preview_status(selected_preview)}\n"
         + "\n".join(symbol_lines[:12])
     )
     result = notifier.send(content)
@@ -769,6 +809,15 @@ def _send_watchlist_decision_summary(
 
     logger.error("Discord watchlist decision summary failed: %s", result.error)
     return False
+
+
+def _preview_status(order_preview: dict[str, Any] | None) -> str:
+    if not order_preview:
+        return "none"
+    errors = order_preview.get("errors")
+    if errors:
+        return f"errors={len(errors)}"
+    return "ready"
 
 
 if __name__ == "__main__":

@@ -1073,17 +1073,17 @@ Ops:
 
 ## 13. Immediate Next Step
 
-Add a read-only Alpaca MLeg order preview for accepted `open` decisions.
+Add a disabled-by-default paper execution gate for allocator-selected `open` decisions.
 
 Recommended next implementation order:
 
-1. Add read-only Alpaca MLeg order payload preview for accepted `open` decisions.
-2. Add validator tests that accepted `open` decisions produce valid but unsubmitted Alpaca payloads.
-3. Add scheduled macro-event placeholders for CPI, FOMC, and major jobs reports.
-4. Replace manual paper-mode earnings dates with an external earnings/calendar provider before live trading.
-5. Keep actual order submission disabled.
+1. Add explicit execution config flags, e.g. `execution.enable_paper_orders: false`.
+2. Add paper-only Alpaca order submission code behind that disabled flag.
+3. Add final pre-submit checks: kill switch, Discord configured, order preview has no errors, max open risk budget remains available.
+4. Add scheduled macro-event placeholders for CPI, FOMC, and major jobs reports.
+5. Replace manual paper-mode earnings dates with an external earnings/calendar provider before live trading.
 
-The next milestone is still not order placement. The next milestone is "an accepted LLM `open` decision can produce a valid Alpaca multi-leg order preview, while the bot remains unable to submit it."
+The next milestone is still not automatic live order placement. The next milestone is "paper order submission exists, but is disabled by default and requires an explicit config flag."
 
 ## 14. Execution Progress
 
@@ -1134,11 +1134,15 @@ Completed:
 - Added deterministic allocator ranking for accepted per-symbol `open` decisions.
 - Added combined watchlist decision JSON artifact with per-symbol decisions and allocator-selected open.
 - Added one-message Discord summary support for watchlist decision runs.
+- Added read-only Alpaca MLeg order preview payloads for validator-accepted `open` decisions.
+- Added allocator-selected `selected_order_preview` to watchlist decision artifacts.
+- Added Discord preview status for single-symbol and watchlist decision summaries.
 - Added unit tests for config loading and put credit spread candidate construction.
 - Added unit tests for LLM decision packet construction and validator rejection paths.
 - Added unit test for stale market data blocking `market_trend_ok`.
 - Added unit tests for candidate liquidity fields, earnings/event blocking, and high-risk news blocking.
 - Added unit tests for deterministic allocator selection.
+- Added unit tests for put credit spread MLeg order preview payloads.
 - Updated paper-mode option data feed to `indicative` because Alpaca returned `OPRA agreement is not signed`.
 - Kept `opra` as the required live-mode target feed before real options execution.
 
@@ -1158,6 +1162,7 @@ Verified:
 - `uv run trading-bot decide --symbols META --max-candidates 10 --send-discord --json-output data/last_decision_meta_aggressive.json`
 - `uv run trading-bot decide-watchlist --symbols AAPL,MSFT --max-candidates 3 --mock-decision skip --json-output data/last_decide_watchlist_mock.json`
 - `uv run trading-bot decide-watchlist --symbols AAPL,MSFT --max-candidates 10 --json-output data/last_decide_watchlist_openai_smoke.json`
+- `uv run trading-bot decide-watchlist --max-candidates 20 --send-discord --json-output data/last_decision_watchlist_with_preview.json`
 - `uv run python -m unittest discover -s tests`
 - `uv run python -m compileall src tests`
 - `git diff --check`
@@ -1176,6 +1181,7 @@ Current known state:
 - Manual paper-mode earnings/event context is included in the LLM packet and enforced by the validator for `open` decisions.
 - Independent per-symbol watchlist decisions work in mock mode and produce one allocator summary.
 - The allocator currently ranks accepted opens by confidence, then reward/risk, then max profit.
+- Read-only Alpaca MLeg order previews are generated for validator-accepted `open` decisions.
 - External earnings/calendar provider integration is still not implemented.
 - The latest real LLM decision accepted by the validator is an `open` recommendation for a read-only META put credit spread: `META-2026-06-12-597.50P-592.50P`, quantity 1, credit limit `-1.02`, max loss USD 398.
 - OPRA is not currently enabled because the OPRA agreement is not signed.

@@ -67,6 +67,8 @@ Run independent per-symbol decisions across the watchlist and let the determinis
 uv run trading-bot decide-watchlist --max-candidates 20 --send-discord --json-output data/last_decision_watchlist.json
 ```
 
+Accepted `open` decisions include a read-only Alpaca MLeg order preview in the JSON artifact. The preview contains the `/v2/orders` payload, but the bot does not submit it.
+
 The decision packet includes account/position/order state, option candidates,
 intraday move, 30-minute moving-average trend context, option quote freshness,
 and recent Alpaca/Benzinga news.
