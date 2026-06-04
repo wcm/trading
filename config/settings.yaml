@@ -22,7 +22,7 @@ account:
 
 risk:
   max_loss_per_trade: 1000
-  max_open_risk: 9000
+  max_open_risk: 5000
   max_open_positions: 3
   max_new_trades_per_day: 3
   max_daily_loss: 500

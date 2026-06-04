@@ -1128,7 +1128,7 @@ Completed:
 - Added hard validator checks for candidate liquidity, earnings/event context, high-risk news, negative news, and open-decision risk checklist values.
 - Added manual paper-mode earnings/event context to the LLM packet.
 - Added manual next earnings dates for AMD and META for paper testing.
-- Raised paper `risk.max_loss_per_trade` from USD 500 to USD 1,000 and `risk.max_open_risk` from USD 1,500 to USD 9,000 to match the aggressive paper experiment.
+- Raised paper `risk.max_loss_per_trade` from USD 500 to USD 1,000 and `risk.max_open_risk` from USD 1,500 to USD 5,000 to match the aggressive paper experiment with a capped total exposure budget.
 - Relaxed `liquidity.max_leg_spread_absolute` from USD 0.20 to USD 0.50 while keeping the 15% spread-of-mid filter.
 - Added unit tests for config loading and put credit spread candidate construction.
 - Added unit tests for LLM decision packet construction and validator rejection paths.
