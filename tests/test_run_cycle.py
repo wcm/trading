@@ -7,6 +7,7 @@ from trading_bot.config import load_config
 from trading_bot.main import (
     _build_run_cycle_artifact,
     _close_recommended_spreads,
+    _send_watchlist_decision_summary,
     _send_run_cycle_summary,
     build_parser,
 )
@@ -39,6 +40,48 @@ def monitor_artifact_with_close() -> dict:
         ],
         "unpaired_legs": [],
         "warnings": [],
+    }
+
+
+def watchlist_artifact_with_reason(reason: str) -> dict:
+    return {
+        "generated_at": "2026-06-04T00:00:00+00:00",
+        "mode": "paper",
+        "symbols": ["AAPL"],
+        "per_symbol": [
+            {
+                "symbol": "AAPL",
+                "decision_id": 1,
+                "accepted": True,
+                "validator_errors": [],
+                "decision": {
+                    "action": "skip",
+                    "symbol": "AAPL",
+                    "candidate_id": None,
+                    "confidence": 0.91,
+                    "decision_reason": reason,
+                    "news_assessment": {
+                        "risk_level": "medium",
+                        "sentiment": "mixed",
+                        "summary": "Full detail test news summary.",
+                    },
+                    "risk_checklist": {
+                        "market_trend_ok": True,
+                        "liquidity_ok": True,
+                    },
+                },
+                "order_preview": None,
+                "selected_candidate": None,
+                "candidate_count": 0,
+            }
+        ],
+        "allocation": {
+            "accepted_open_count": 0,
+            "selected_open": None,
+            "ranked_opens": [],
+        },
+        "selected_order_preview": None,
+        "execution_attempt": None,
     }
 
 
@@ -103,6 +146,46 @@ class RunCycleTests(unittest.TestCase):
         self.assertIn("Open decisions: skipped", notifier.messages[0])
         self.assertIn("AAPL-2099-12-31-305P-300P", notifier.messages[0])
         self.assertIn("preview=ready", notifier.messages[0])
+
+    def test_watchlist_discord_sends_full_decision_reason_in_detail_message(self) -> None:
+        reason = "This is a long decision reason. " * 12
+        artifact = watchlist_artifact_with_reason(reason)
+        notifier = FakeNotifier()
+
+        ok = _send_watchlist_decision_summary(notifier, artifact, logging.getLogger("test"))
+
+        self.assertTrue(ok)
+        self.assertEqual(len(notifier.messages), 2)
+        self.assertIn("Decision detail messages: 1", notifier.messages[0])
+        self.assertNotIn(reason, notifier.messages[0])
+        self.assertIn(reason, notifier.messages[1])
+
+    def test_run_cycle_discord_chunks_full_decision_reason_when_needed(self) -> None:
+        reason = "R" * 2300
+        watchlist = watchlist_artifact_with_reason(reason)
+        artifact = _build_run_cycle_artifact(
+            config=load_config("config/settings.yaml"),
+            phase="monitor_then_open",
+            monitor_artifact={
+                "generated_at": "2026-06-04T00:00:00+00:00",
+                "option_position_count": 0,
+                "spread_count": 0,
+                "spreads": [],
+                "unpaired_legs": [],
+                "warnings": [],
+            },
+            close_recommended_spreads=[],
+            watchlist_artifact=watchlist,
+            skipped_open_reason=None,
+        )
+        notifier = FakeNotifier()
+
+        ok = _send_run_cycle_summary(notifier, artifact, logging.getLogger("test"))
+
+        self.assertTrue(ok)
+        self.assertGreater(len(notifier.messages), 2)
+        self.assertIn("Decision detail messages: 1", notifier.messages[0])
+        self.assertIn(reason, "".join(notifier.messages[1:]))
 
 
 if __name__ == "__main__":

@@ -1154,6 +1154,7 @@ Completed:
 - Added a non-overlap process lock for `run-cycle`.
 - Added explicit `runtime.cycle_lock_path` config.
 - Added one-message Discord summary support for full run cycles.
+- Added full per-symbol Discord decision detail messages for watchlist and run-cycle notifications.
 - Added unit tests for config loading and put credit spread candidate construction.
 - Added unit tests for LLM decision packet construction and validator rejection paths.
 - Added unit test for stale market data blocking `market_trend_ok`.
@@ -1183,6 +1184,7 @@ Verified:
 - `uv run trading-bot decide-watchlist --symbols AAPL,MSFT --max-candidates 3 --mock-decision skip --json-output data/last_decide_watchlist_mock.json`
 - `uv run trading-bot decide-watchlist --symbols AAPL,MSFT --max-candidates 10 --json-output data/last_decide_watchlist_openai_smoke.json`
 - `uv run trading-bot decide-watchlist --max-candidates 20 --send-discord --json-output data/last_decision_watchlist_with_preview.json`
+- `uv run trading-bot decide-watchlist --symbols AAPL --max-candidates 1 --mock-decision skip --send-discord --json-output data/last_decision_watchlist_full_discord.json`
 - `uv run trading-bot decide-watchlist --symbols AAPL --max-candidates 1 --mock-decision skip --submit-paper --json-output data/last_submit_paper_blocked_mock.json`
 - `uv run trading-bot monitor-positions --send-discord --json-output data/last_position_monitor.json`
 - `uv run trading-bot run-cycle --symbols AAPL,MSFT --max-candidates 1 --mock-decision skip --json-output data/last_run_cycle_mock.json`

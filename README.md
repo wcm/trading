@@ -70,6 +70,9 @@ Run independent per-symbol decisions across the watchlist and let the determinis
 uv run trading-bot decide-watchlist --max-candidates 20 --send-discord --json-output data/last_decision_watchlist.json
 ```
 
+Discord sends one compact watchlist summary plus one full-detail message for
+each symbol decision.
+
 Accepted `open` decisions include a read-only Alpaca MLeg order preview in the JSON artifact. The preview contains the `/v2/orders` payload.
 
 Paper order submission has two locks and is disabled by default:

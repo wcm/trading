@@ -33,6 +33,9 @@ from trading_bot.storage.db import (
 from trading_bot.strategy.put_credit_spread import scan_put_credit_spreads
 
 
+DISCORD_CONTENT_LIMIT = 1900
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="trading-bot")
     parser.add_argument(
@@ -1208,15 +1211,6 @@ def _send_watchlist_decision_summary(
         if selected
         else "none"
     )
-    symbol_lines = []
-    for item in artifact["per_symbol"]:
-        decision = item.get("decision") or {}
-        action = decision.get("action", "error")
-        reason = item.get("error") or decision.get("decision_reason", "")
-        symbol_lines.append(
-            f"- {item.get('symbol')}: {action} candidate={decision.get('candidate_id')} "
-            f"confidence={decision.get('confidence')} reason={str(reason)[:160]}"
-        )
 
     content = (
         "Read-only watchlist decision complete\n"
@@ -1225,14 +1219,13 @@ def _send_watchlist_decision_summary(
         f"Selected open: {selected_line}\n"
         f"Order preview: {_preview_status(selected_preview)}\n"
         f"Execution: {_execution_status(execution_attempt)}\n"
-        + "\n".join(symbol_lines[:12])
+        f"Decision detail messages: {len(artifact.get('per_symbol') or [])}"
     )
-    result = notifier.send(content)
-    if result.ok:
-        logger.info("Discord watchlist decision summary sent")
+    messages = [content]
+    messages.extend(_watchlist_decision_detail_messages(artifact, heading="Watchlist decision"))
+    if _send_discord_messages(notifier, messages, logger, "watchlist decision summary"):
         return True
 
-    logger.error("Discord watchlist decision summary failed: %s", result.error)
     return False
 
 
@@ -1282,24 +1275,115 @@ def _send_run_cycle_summary(
                 f"Selected open: {selected_line}",
                 f"Order preview: {_preview_status(selected_preview)}",
                 f"Execution: {_execution_status(execution_attempt)}",
+                f"Decision detail messages: {len(watchlist.get('per_symbol') or [])}",
             ]
         )
-        for item in (watchlist.get("per_symbol") or [])[:8]:
-            decision = item.get("decision") or {}
-            action = decision.get("action", "error")
-            reason = item.get("error") or decision.get("decision_reason", "")
-            lines.append(
-                f"- {item.get('symbol')}: {action} candidate={decision.get('candidate_id')} "
-                f"confidence={decision.get('confidence')} reason={str(reason)[:120]}"
-            )
 
-    result = notifier.send("\n".join(lines))
-    if result.ok:
-        logger.info("Discord run-cycle summary sent")
+    messages = ["\n".join(lines)]
+    if not close_spreads:
+        messages.extend(_watchlist_decision_detail_messages(watchlist, heading="Run-cycle decision"))
+    if _send_discord_messages(notifier, messages, logger, "run-cycle summary"):
         return True
 
-    logger.error("Discord run-cycle summary failed: %s", result.error)
     return False
+
+
+def _watchlist_decision_detail_messages(artifact: dict[str, Any], *, heading: str) -> list[str]:
+    items = artifact.get("per_symbol") or []
+    total = len(items)
+    messages = []
+    for index, item in enumerate(items, start=1):
+        if not isinstance(item, dict):
+            continue
+        decision = item.get("decision") or {}
+        action = decision.get("action", "error")
+        reason = item.get("error") or decision.get("decision_reason") or "-"
+        candidate = item.get("selected_candidate") or {}
+        validator_errors = item.get("validator_errors") or []
+        news_assessment = decision.get("news_assessment") or {}
+        risk_checklist = decision.get("risk_checklist") or {}
+        lines = [
+            f"{heading} {index}/{total}",
+            f"Symbol: {item.get('symbol')}",
+            f"Action: {action}",
+            f"Accepted: {item.get('accepted')}",
+            f"Candidate: {decision.get('candidate_id')}",
+            f"Confidence: {decision.get('confidence')}",
+            f"Order preview: {_preview_status(item.get('order_preview'))}",
+        ]
+        if candidate:
+            lines.extend(
+                [
+                    "Candidate details:",
+                    (
+                        f"{candidate.get('underlying_symbol')} "
+                        f"{candidate.get('short_strike')}/{candidate.get('long_strike')}P "
+                        f"exp={candidate.get('expiration_date')} "
+                        f"credit={candidate.get('net_credit')} "
+                        f"max_loss={candidate.get('max_loss')}"
+                    ),
+                ]
+            )
+        if validator_errors:
+            lines.append("Validator errors:")
+            lines.extend(f"- {error}" for error in validator_errors)
+        if isinstance(news_assessment, dict) and news_assessment:
+            lines.extend(
+                [
+                    "News assessment:",
+                    f"risk={news_assessment.get('risk_level')} sentiment={news_assessment.get('sentiment')}",
+                    str(news_assessment.get("summary") or "-"),
+                ]
+            )
+        if isinstance(risk_checklist, dict) and risk_checklist:
+            checklist = ", ".join(f"{key}={value}" for key, value in sorted(risk_checklist.items()))
+            lines.extend(["Risk checklist:", checklist])
+        lines.extend(["Reason:", str(reason)])
+        messages.append("\n".join(lines))
+    return messages
+
+
+def _send_discord_messages(
+    notifier: DiscordNotifier,
+    messages: list[str],
+    logger: logging.Logger,
+    label: str,
+) -> bool:
+    sent_count = 0
+    for message in messages:
+        for part in _split_discord_content(message):
+            result = notifier.send(part)
+            if not result.ok:
+                logger.error("Discord %s failed: %s", label, result.error)
+                return False
+            sent_count += 1
+
+    logger.info("Discord %s sent: messages=%s", label, sent_count)
+    return True
+
+
+def _split_discord_content(content: str, limit: int = DISCORD_CONTENT_LIMIT) -> list[str]:
+    if len(content) <= limit:
+        return [content]
+
+    parts: list[str] = []
+    current = ""
+    for line in content.splitlines(keepends=True):
+        while len(line) > limit:
+            if current:
+                parts.append(current.rstrip("\n"))
+                current = ""
+            parts.append(line[:limit])
+            line = line[limit:]
+        if len(current) + len(line) > limit:
+            if current:
+                parts.append(current.rstrip("\n"))
+            current = ""
+        current += line
+
+    if current:
+        parts.append(current.rstrip("\n"))
+    return parts or [""]
 
 
 def _preview_status(order_preview: dict[str, Any] | None) -> str:
