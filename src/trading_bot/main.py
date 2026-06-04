@@ -30,6 +30,7 @@ from trading_bot.storage.db import (
     record_execution_attempt,
     record_llm_decision,
     record_option_scan,
+    record_order_status_changes,
 )
 from trading_bot.strategy.put_credit_spread import scan_put_credit_spreads
 
@@ -183,6 +184,37 @@ def build_parser() -> argparse.ArgumentParser:
         help="Request paper close order submission for recommended closes. Requires execution.enable_paper_close_orders=true.",
     )
 
+    poll_orders = subparsers.add_parser(
+        "poll-orders",
+        help="Poll Alpaca order statuses and notify on lifecycle changes.",
+    )
+    poll_orders.add_argument(
+        "--status",
+        choices=["open", "closed", "all"],
+        default="all",
+        help="Alpaca order status filter.",
+    )
+    poll_orders.add_argument(
+        "--limit",
+        type=int,
+        default=50,
+        help="Maximum Alpaca orders to poll.",
+    )
+    poll_orders.add_argument(
+        "--send-discord",
+        action="store_true",
+        help="Send Discord notifications for detected order changes.",
+    )
+    poll_orders.add_argument(
+        "--notify-no-changes",
+        action="store_true",
+        help="Send a Discord message even when no order changes were detected.",
+    )
+    poll_orders.add_argument(
+        "--json-output",
+        help="Optional path to write the order poll artifact JSON.",
+    )
+
     cycle = subparsers.add_parser(
         "run-cycle",
         help="Run one monitor-before-open bot cycle.",
@@ -271,6 +303,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional directory for timestamped run-cycle JSON artifacts.",
     )
     scheduler.add_argument(
+        "--skip-order-poll",
+        action="store_true",
+        help="Do not poll recent Alpaca order statuses after each scheduler check.",
+    )
+    scheduler.add_argument(
+        "--order-poll-limit",
+        type=int,
+        help="Maximum Alpaca orders to poll after each scheduler check. Defaults to runtime.scheduler_order_poll_limit.",
+    )
+    scheduler.add_argument(
         "--mock-decision",
         choices=["skip", "disable_trading"],
         help="Use local mock decisions instead of calling OpenAI when cycles run.",
@@ -317,6 +359,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_watchlist_decisions(args)
     if args.command == "monitor-positions":
         return run_position_monitor(args)
+    if args.command == "poll-orders":
+        return run_order_poll(args)
     if args.command == "run-cycle":
         return run_cycle(args)
     if args.command == "schedule-local":
@@ -626,6 +670,7 @@ def run_local_scheduler(args: argparse.Namespace) -> int:
             "once": args.once,
             "ignore_market_hours": args.ignore_market_hours,
             "send_cycle_discord": args.send_cycle_discord,
+            "skip_order_poll": args.skip_order_poll,
         },
     )
 
@@ -641,6 +686,7 @@ def run_local_scheduler(args: argparse.Namespace) -> int:
 
     cycle_count = 0
     skipped_count = 0
+    order_change_count = 0
     error_count = 0
     last_status = "started"
     next_heartbeat_at = time.monotonic() + heartbeat_minutes * 60 if heartbeat_minutes > 0 else None
@@ -690,6 +736,27 @@ def run_local_scheduler(args: argparse.Namespace) -> int:
                     )
                     logger.info("Scheduler skipped cycle because Alpaca market is closed: %s", last_status)
 
+                if not args.skip_order_poll:
+                    try:
+                        order_poll = _poll_order_status_changes(
+                            config=config,
+                            logger=logger,
+                            db_path=db_path,
+                            alpaca=alpaca,
+                            status="all",
+                            limit=_scheduler_order_poll_limit(args, config),
+                        )
+                    except Exception as exc:  # noqa: BLE001 - scheduler should keep supervising
+                        error_count += 1
+                        last_status = f"order_poll_error: {exc}"
+                        logger.exception("Scheduler order lifecycle poll failed: %s", exc)
+                        if args.send_discord:
+                            _send_scheduler_error(notifier, logger, phase="poll-orders", error=str(exc))
+                    else:
+                        order_change_count += int(order_poll.get("change_count") or 0)
+                        if args.send_discord and order_poll.get("changes"):
+                            _send_order_poll_summary(notifier, order_poll, logger)
+
             if args.once:
                 break
 
@@ -706,7 +773,7 @@ def run_local_scheduler(args: argparse.Namespace) -> int:
                     heartbeat_minutes=heartbeat_minutes,
                     details=(
                         f"{last_status}; cycles={cycle_count}; skipped={skipped_count}; "
-                        f"errors={error_count}"
+                        f"order_changes={order_change_count}; errors={error_count}"
                     ),
                 )
                 next_heartbeat_at = time.monotonic() + heartbeat_minutes * 60
@@ -728,6 +795,7 @@ def run_local_scheduler(args: argparse.Namespace) -> int:
             "command": "schedule-local",
             "cycles": cycle_count,
             "skipped": skipped_count,
+            "order_changes": order_change_count,
             "errors": error_count,
             "last_status": last_status,
         },
@@ -741,7 +809,7 @@ def run_local_scheduler(args: argparse.Namespace) -> int:
             heartbeat_minutes=heartbeat_minutes,
             details=(
                 f"{last_status}; cycles={cycle_count}; skipped={skipped_count}; "
-                f"errors={error_count}"
+                f"order_changes={order_change_count}; errors={error_count}"
             ),
         )
     return 0 if error_count == 0 else 1
@@ -1034,6 +1102,85 @@ def run_position_monitor(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_order_poll(args: argparse.Namespace) -> int:
+    config, logger, db_path, _kill_switch, notifier = bootstrap(args)
+    logger.info("Starting order lifecycle poll status=%s limit=%s", args.status, args.limit)
+
+    try:
+        alpaca = AlpacaClient.from_config(config)
+    except AlpacaCredentialsError as exc:
+        logger.error("%s", exc)
+        return 1
+
+    try:
+        artifact = _poll_order_status_changes(
+            config=config,
+            logger=logger,
+            db_path=db_path,
+            alpaca=alpaca,
+            status=args.status,
+            limit=args.limit,
+        )
+    except Exception as exc:  # noqa: BLE001 - report broker/API errors cleanly in CLI
+        logger.exception("Order lifecycle poll failed: %s", exc)
+        return 1
+
+    if args.json_output:
+        _write_json_artifact(args.json_output, artifact, logger, "order poll")
+
+    if args.send_discord and (artifact["changes"] or args.notify_no_changes):
+        discord_ok = _send_order_poll_summary(notifier, artifact, logger)
+        if not discord_ok:
+            return 1
+
+    return 0
+
+
+def _poll_order_status_changes(
+    *,
+    config,
+    logger: logging.Logger,
+    db_path: Path,
+    alpaca: AlpacaClient,
+    status: str,
+    limit: int,
+) -> dict[str, Any]:
+    observed_at = datetime.now(UTC).isoformat()
+    orders = alpaca.get_orders(status=status, limit=limit)
+    changes = record_order_status_changes(
+        db_path,
+        observed_at=observed_at,
+        mode=config.mode,
+        orders=orders,
+    )
+    logger.info(
+        "Order lifecycle poll complete: status=%s orders=%s changes=%s",
+        status,
+        len(orders),
+        len(changes),
+    )
+    for change in changes:
+        logger.info(
+            "Order change id=%s client_order_id=%s status=%s previous_status=%s filled=%s previous_filled=%s",
+            change.get("broker_order_id"),
+            change.get("client_order_id"),
+            change.get("status"),
+            change.get("previous_status"),
+            change.get("filled_qty"),
+            change.get("previous_filled_qty"),
+        )
+    return {
+        "generated_at": observed_at,
+        "mode": config.mode,
+        "status_filter": status,
+        "limit": limit,
+        "order_count": len(orders),
+        "change_count": len(changes),
+        "changes": changes,
+        "orders": orders,
+    }
+
+
 def _write_json_artifact(
     output_path_value: str,
     artifact: dict[str, Any],
@@ -1209,6 +1356,12 @@ def _scheduler_heartbeat_minutes(args: argparse.Namespace, config) -> float:
     if args.heartbeat_minutes is not None:
         return float(args.heartbeat_minutes)
     return float(config.get("runtime", "scheduler_heartbeat_minutes", default=60))
+
+
+def _scheduler_order_poll_limit(args: argparse.Namespace, config) -> int:
+    if args.order_poll_limit is not None:
+        return int(args.order_poll_limit)
+    return int(config.get("runtime", "scheduler_order_poll_limit", default=50))
 
 
 def _scheduler_cycle_json_output(args: argparse.Namespace, now: datetime) -> str | None:
@@ -1698,6 +1851,32 @@ def _send_run_cycle_summary(
         return True
 
     return False
+
+
+def _send_order_poll_summary(
+    notifier: DiscordNotifier,
+    artifact: dict[str, Any],
+    logger: logging.Logger,
+) -> bool:
+    changes = artifact.get("changes") or []
+    lines = [
+        "Order lifecycle update",
+        f"Status filter: {artifact.get('status_filter')}",
+        f"Orders polled: {artifact.get('order_count')}",
+        f"Changes: {artifact.get('change_count')}",
+    ]
+    if not changes:
+        lines.append("- No order status changes detected.")
+    for change in changes:
+        lines.append(
+            f"- {change.get('broker_order_id')} client={change.get('client_order_id')} "
+            f"symbol={change.get('symbol')} status={change.get('previous_status')}->{change.get('status')} "
+            f"filled={change.get('previous_filled_qty')}->{change.get('filled_qty')} "
+            f"qty={change.get('qty')} class={change.get('order_class')}"
+        )
+
+    messages = _split_discord_content("\n".join(lines))
+    return _send_discord_messages(notifier, messages, logger, "order lifecycle update")
 
 
 def _close_execution_status_lines(close_execution_attempts: list[dict[str, Any]]) -> list[str]:

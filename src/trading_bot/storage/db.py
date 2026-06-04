@@ -95,6 +95,40 @@ def init_db(db_path: Path) -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS order_status_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                observed_at TEXT NOT NULL,
+                mode TEXT NOT NULL,
+                broker_order_id TEXT NOT NULL,
+                client_order_id TEXT,
+                symbol TEXT,
+                status TEXT,
+                filled_qty TEXT,
+                qty TEXT,
+                order_class TEXT,
+                side TEXT,
+                submitted_at TEXT,
+                filled_at TEXT,
+                canceled_at TEXT,
+                expired_at TEXT,
+                raw_order_json TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_order_status_events_order_id
+            ON order_status_events (broker_order_id, id)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_order_status_events_mode_order_id
+            ON order_status_events (mode, broker_order_id, id)
+            """
+        )
         conn.commit()
 
 
@@ -210,6 +244,107 @@ def record_llm_decision(
         )
         conn.commit()
         return int(cursor.lastrowid)
+
+
+def record_order_status_changes(
+    db_path: Path,
+    *,
+    observed_at: str,
+    mode: str,
+    orders: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    changes: list[dict[str, Any]] = []
+    with closing(sqlite3.connect(db_path)) as conn:
+        for order in orders:
+            broker_order_id = str(order.get("id") or "")
+            if not broker_order_id:
+                continue
+
+            status = _string_or_none(order.get("status"))
+            filled_qty = _string_or_none(order.get("filled_qty"))
+            previous = conn.execute(
+                """
+                SELECT status, filled_qty
+                FROM order_status_events
+                WHERE mode = ? AND broker_order_id = ?
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (mode, broker_order_id),
+            ).fetchone()
+            previous_status = previous[0] if previous else None
+            previous_filled_qty = previous[1] if previous else None
+            if previous and previous_status == status and previous_filled_qty == filled_qty:
+                continue
+
+            cursor = conn.execute(
+                """
+                INSERT INTO order_status_events (
+                    observed_at,
+                    mode,
+                    broker_order_id,
+                    client_order_id,
+                    symbol,
+                    status,
+                    filled_qty,
+                    qty,
+                    order_class,
+                    side,
+                    submitted_at,
+                    filled_at,
+                    canceled_at,
+                    expired_at,
+                    raw_order_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    observed_at,
+                    mode,
+                    broker_order_id,
+                    _string_or_none(order.get("client_order_id")),
+                    _string_or_none(order.get("symbol")),
+                    status,
+                    filled_qty,
+                    _string_or_none(order.get("qty")),
+                    _string_or_none(order.get("order_class")),
+                    _string_or_none(order.get("side")),
+                    _string_or_none(order.get("submitted_at")),
+                    _string_or_none(order.get("filled_at")),
+                    _string_or_none(order.get("canceled_at")),
+                    _string_or_none(order.get("expired_at")),
+                    json.dumps(order, sort_keys=True),
+                ),
+            )
+            change = {
+                "event_id": int(cursor.lastrowid),
+                "observed_at": observed_at,
+                "mode": mode,
+                "broker_order_id": broker_order_id,
+                "client_order_id": _string_or_none(order.get("client_order_id")),
+                "symbol": _string_or_none(order.get("symbol")),
+                "status": status,
+                "previous_status": previous_status,
+                "filled_qty": filled_qty,
+                "previous_filled_qty": previous_filled_qty,
+                "qty": _string_or_none(order.get("qty")),
+                "order_class": _string_or_none(order.get("order_class")),
+                "side": _string_or_none(order.get("side")),
+                "submitted_at": _string_or_none(order.get("submitted_at")),
+                "filled_at": _string_or_none(order.get("filled_at")),
+                "canceled_at": _string_or_none(order.get("canceled_at")),
+                "expired_at": _string_or_none(order.get("expired_at")),
+                "raw_order": order,
+            }
+            changes.append(change)
+        conn.commit()
+    return changes
+
+
+def _string_or_none(value: Any) -> str | None:
+    if value is None:
+        return None
+    return str(value)
 
 
 def record_execution_attempt(

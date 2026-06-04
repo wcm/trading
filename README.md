@@ -100,6 +100,16 @@ The command above still refuses to submit close orders unless
 Blocked or submitted close attempts are logged to SQLite `execution_attempts`.
 `run-cycle` and `schedule-local` also accept `--submit-paper-close`.
 
+Poll recent Alpaca orders and record lifecycle changes:
+
+```bash
+uv run trading-bot poll-orders --status all --limit 50 --send-discord --json-output data/last_order_poll.json
+```
+
+Repeated polls only notify when an order status or filled quantity changes,
+unless `--notify-no-changes` is provided. Large lifecycle updates are split
+across Discord messages instead of truncating changed orders.
+
 Run one full local bot cycle. This monitors existing positions first, skips new
 open decisions when any spread has a close recommendation, and otherwise runs
 the watchlist decision/allocation path:
@@ -132,6 +142,8 @@ uv run trading-bot schedule-local --symbols AAPL --max-candidates 1 --mock-decis
 
 Use `--send-cycle-discord` only when you want every scheduled cycle to also send
 the full run-cycle decision summary.
+The scheduler also polls recent Alpaca order statuses after each check unless
+`--skip-order-poll` is used.
 
 The decision packet includes account/position/order state, option candidates,
 intraday move, 30-minute moving-average trend context, option quote freshness,

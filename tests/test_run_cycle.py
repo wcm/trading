@@ -12,6 +12,8 @@ from trading_bot.main import (
     _scheduler_cycle_json_output,
     _scheduler_heartbeat_minutes,
     _scheduler_interval_minutes,
+    _scheduler_order_poll_limit,
+    _send_order_poll_summary,
     _send_watchlist_decision_summary,
     _send_run_cycle_summary,
     build_parser,
@@ -126,6 +128,9 @@ class RunCycleTests(unittest.TestCase):
                 "--send-discord",
                 "--send-cycle-discord",
                 "--submit-paper-close",
+                "--skip-order-poll",
+                "--order-poll-limit",
+                "25",
                 "--once",
                 "--ignore-market-hours",
                 "--mock-decision",
@@ -140,8 +145,32 @@ class RunCycleTests(unittest.TestCase):
         self.assertTrue(args.send_discord)
         self.assertTrue(args.send_cycle_discord)
         self.assertTrue(args.submit_paper_close)
+        self.assertTrue(args.skip_order_poll)
+        self.assertEqual(args.order_poll_limit, 25)
         self.assertTrue(args.once)
         self.assertTrue(args.ignore_market_hours)
+
+    def test_parser_accepts_poll_orders_args(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "poll-orders",
+                "--status",
+                "all",
+                "--limit",
+                "25",
+                "--send-discord",
+                "--notify-no-changes",
+                "--json-output",
+                "data/order_poll.json",
+            ]
+        )
+
+        self.assertEqual(args.command, "poll-orders")
+        self.assertEqual(args.status, "all")
+        self.assertEqual(args.limit, 25)
+        self.assertTrue(args.send_discord)
+        self.assertTrue(args.notify_no_changes)
+        self.assertEqual(args.json_output, "data/order_poll.json")
 
     def test_scheduler_defaults_and_cycle_args(self) -> None:
         config = load_config("config/settings.yaml")
@@ -159,6 +188,7 @@ class RunCycleTests(unittest.TestCase):
 
         self.assertEqual(_scheduler_interval_minutes(args, config), 3)
         self.assertEqual(_scheduler_heartbeat_minutes(args, config), 60)
+        self.assertEqual(_scheduler_order_poll_limit(args, config), 50)
 
         cycle_args = _scheduler_cycle_args(args, "data/test_cycle.json")
         self.assertEqual(cycle_args.command, "run-cycle")
@@ -265,6 +295,40 @@ class RunCycleTests(unittest.TestCase):
         self.assertGreater(len(notifier.messages), 2)
         self.assertIn("Decision detail messages: 1", notifier.messages[0])
         self.assertIn(reason, "".join(notifier.messages[1:]))
+
+    def test_order_poll_discord_sends_all_changes(self) -> None:
+        changes = [
+            {
+                "broker_order_id": f"order-{index}",
+                "client_order_id": f"client-{index}",
+                "symbol": "AAPL",
+                "previous_status": "new",
+                "status": "filled",
+                "previous_filled_qty": "0",
+                "filled_qty": "1",
+                "qty": "1",
+                "order_class": "mleg",
+            }
+            for index in range(12)
+        ]
+        notifier = FakeNotifier()
+
+        ok = _send_order_poll_summary(
+            notifier,
+            {
+                "status_filter": "all",
+                "order_count": 12,
+                "change_count": 12,
+                "changes": changes,
+            },
+            logging.getLogger("test"),
+        )
+
+        self.assertTrue(ok)
+        content = "\n".join(notifier.messages)
+        self.assertIn("Changes: 12", content)
+        self.assertIn("order-0", content)
+        self.assertIn("order-11", content)
 
 
 if __name__ == "__main__":

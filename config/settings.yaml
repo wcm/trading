@@ -131,4 +131,5 @@ runtime:
   cycle_lock_path: data/run_cycle.lock
   scheduler_interval_minutes: 3
   scheduler_heartbeat_minutes: 60
+  scheduler_order_poll_limit: 50
   log_dir: logs
