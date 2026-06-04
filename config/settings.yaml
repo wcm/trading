@@ -91,6 +91,7 @@ decision_engine:
   type: llm
   provider: openai
   model: gpt-5.5
+  reasoning_effort: medium
   openai_base_url: https://api.openai.com/v1
   prompt_version: put_credit_spread_v1
   temperature: 0
@@ -127,4 +128,6 @@ storage:
 runtime:
   kill_switch_path: KILL_SWITCH
   cycle_lock_path: data/run_cycle.lock
+  scheduler_interval_minutes: 3
+  scheduler_heartbeat_minutes: 60
   log_dir: logs

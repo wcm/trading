@@ -2,11 +2,16 @@ from __future__ import annotations
 
 import logging
 import unittest
+from datetime import UTC, datetime
 
 from trading_bot.config import load_config
 from trading_bot.main import (
     _build_run_cycle_artifact,
     _close_recommended_spreads,
+    _scheduler_cycle_args,
+    _scheduler_cycle_json_output,
+    _scheduler_heartbeat_minutes,
+    _scheduler_interval_minutes,
     _send_watchlist_decision_summary,
     _send_run_cycle_summary,
     build_parser,
@@ -105,6 +110,72 @@ class RunCycleTests(unittest.TestCase):
         self.assertEqual(args.max_candidates, 3)
         self.assertEqual(args.mock_decision, "skip")
         self.assertTrue(args.submit_paper)
+
+    def test_parser_accepts_schedule_local_args(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "schedule-local",
+                "--symbols",
+                "AAPL,MSFT",
+                "--interval-minutes",
+                "3",
+                "--heartbeat-minutes",
+                "30",
+                "--send-discord",
+                "--send-cycle-discord",
+                "--once",
+                "--ignore-market-hours",
+                "--mock-decision",
+                "skip",
+            ]
+        )
+
+        self.assertEqual(args.command, "schedule-local")
+        self.assertEqual(args.symbols, "AAPL,MSFT")
+        self.assertEqual(args.interval_minutes, 3)
+        self.assertEqual(args.heartbeat_minutes, 30)
+        self.assertTrue(args.send_discord)
+        self.assertTrue(args.send_cycle_discord)
+        self.assertTrue(args.once)
+        self.assertTrue(args.ignore_market_hours)
+
+    def test_scheduler_defaults_and_cycle_args(self) -> None:
+        config = load_config("config/settings.yaml")
+        args = build_parser().parse_args(
+            [
+                "schedule-local",
+                "--symbols",
+                "AAPL",
+                "--max-candidates",
+                "2",
+                "--mock-decision",
+                "skip",
+            ]
+        )
+
+        self.assertEqual(_scheduler_interval_minutes(args, config), 3)
+        self.assertEqual(_scheduler_heartbeat_minutes(args, config), 60)
+
+        cycle_args = _scheduler_cycle_args(args, "data/test_cycle.json")
+        self.assertEqual(cycle_args.command, "run-cycle")
+        self.assertEqual(cycle_args.symbols, "AAPL")
+        self.assertEqual(cycle_args.max_candidates, 2)
+        self.assertFalse(cycle_args.send_discord)
+        self.assertEqual(cycle_args.json_output, "data/test_cycle.json")
+
+    def test_scheduler_cycle_json_output_is_timestamped(self) -> None:
+        args = build_parser().parse_args(
+            ["schedule-local", "--json-output-dir", "data/scheduler_cycles"]
+        )
+
+        path = _scheduler_cycle_json_output(
+            args,
+            datetime(2026, 6, 4, 15, 30, tzinfo=UTC),
+        )
+
+        self.assertIsNotNone(path)
+        assert path is not None
+        self.assertTrue(path.endswith("data/scheduler_cycles/run_cycle_20260604T153000Z.json"))
 
     def test_cycle_artifact_skips_open_decisions_when_close_is_recommended(self) -> None:
         config = load_config("config/settings.yaml")

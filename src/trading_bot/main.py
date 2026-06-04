@@ -4,6 +4,7 @@ import argparse
 import json
 import logging
 import os
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TextIO
@@ -216,6 +217,70 @@ def build_parser() -> argparse.ArgumentParser:
         help="Request paper order submission for an allocator-selected open. Requires execution.enable_paper_orders=true.",
     )
 
+    scheduler = subparsers.add_parser(
+        "schedule-local",
+        help="Run run-cycle repeatedly during US market hours.",
+    )
+    scheduler.add_argument(
+        "--symbols",
+        help="Comma-separated symbols. Defaults to strategy.watchlist.",
+    )
+    scheduler.add_argument(
+        "--max-candidates",
+        type=int,
+        default=20,
+        help="Maximum candidates to pass to each per-symbol LLM decision.",
+    )
+    scheduler.add_argument(
+        "--option-feed",
+        choices=["indicative", "opra"],
+        help="Override Alpaca option data feed for scheduled cycles.",
+    )
+    scheduler.add_argument(
+        "--interval-minutes",
+        type=float,
+        help="Minutes to wait after each scheduler check. Defaults to runtime.scheduler_interval_minutes.",
+    )
+    scheduler.add_argument(
+        "--heartbeat-minutes",
+        type=float,
+        help="Minutes between scheduler heartbeat messages. Defaults to runtime.scheduler_heartbeat_minutes.",
+    )
+    scheduler.add_argument(
+        "--send-discord",
+        action="store_true",
+        help="Send scheduler heartbeat and error messages.",
+    )
+    scheduler.add_argument(
+        "--send-cycle-discord",
+        action="store_true",
+        help="Also send each run-cycle's detailed Discord summary.",
+    )
+    scheduler.add_argument(
+        "--json-output-dir",
+        help="Optional directory for timestamped run-cycle JSON artifacts.",
+    )
+    scheduler.add_argument(
+        "--mock-decision",
+        choices=["skip", "disable_trading"],
+        help="Use local mock decisions instead of calling OpenAI when cycles run.",
+    )
+    scheduler.add_argument(
+        "--submit-paper",
+        action="store_true",
+        help="Request paper order submission for selected opens. Requires execution.enable_paper_orders=true.",
+    )
+    scheduler.add_argument(
+        "--once",
+        action="store_true",
+        help="Run one scheduler check and exit. Useful for local validation.",
+    )
+    scheduler.add_argument(
+        "--ignore-market-hours",
+        action="store_true",
+        help="Run cycles even when Alpaca reports the market is closed. Useful for mock validation only.",
+    )
+
     return parser
 
 
@@ -239,6 +304,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_position_monitor(args)
     if args.command == "run-cycle":
         return run_cycle(args)
+    if args.command == "schedule-local":
+        return run_local_scheduler(args)
 
     parser.error(f"Unknown command: {args.command}")
     return 2
@@ -505,6 +572,164 @@ def run_cycle(args: argparse.Namespace) -> int:
         )
     finally:
         _release_run_cycle_lock(lock_handle, logger)
+
+
+def run_local_scheduler(args: argparse.Namespace) -> int:
+    config, logger, db_path, _kill_switch, notifier = bootstrap(args)
+    interval_minutes = _scheduler_interval_minutes(args, config)
+    heartbeat_minutes = _scheduler_heartbeat_minutes(args, config)
+    if interval_minutes <= 0:
+        logger.error("Scheduler interval must be positive: %s", interval_minutes)
+        return 1
+    if heartbeat_minutes < 0:
+        logger.error("Scheduler heartbeat interval cannot be negative: %s", heartbeat_minutes)
+        return 1
+
+    try:
+        alpaca = AlpacaClient.from_config(config)
+    except AlpacaCredentialsError as exc:
+        logger.error("%s", exc)
+        return 1
+
+    started_at = datetime.now(UTC).isoformat()
+    logger.info(
+        "Starting local scheduler interval_minutes=%s heartbeat_minutes=%s once=%s ignore_market_hours=%s",
+        interval_minutes,
+        heartbeat_minutes,
+        args.once,
+        args.ignore_market_hours,
+    )
+    record_bot_run(
+        db_path,
+        started_at=started_at,
+        mode=config.mode,
+        status="started",
+        details={
+            "command": "schedule-local",
+            "interval_minutes": interval_minutes,
+            "heartbeat_minutes": heartbeat_minutes,
+            "once": args.once,
+            "ignore_market_hours": args.ignore_market_hours,
+            "send_cycle_discord": args.send_cycle_discord,
+        },
+    )
+
+    if args.send_discord:
+        _send_scheduler_heartbeat(
+            notifier,
+            logger,
+            status="started",
+            interval_minutes=interval_minutes,
+            heartbeat_minutes=heartbeat_minutes,
+            details=f"cycle_discord={args.send_cycle_discord} once={args.once}",
+        )
+
+    cycle_count = 0
+    skipped_count = 0
+    error_count = 0
+    last_status = "started"
+    next_heartbeat_at = time.monotonic() + heartbeat_minutes * 60 if heartbeat_minutes > 0 else None
+
+    try:
+        while True:
+            now = datetime.now(UTC)
+            try:
+                clock = alpaca.get_clock()
+            except Exception as exc:  # noqa: BLE001 - scheduler should keep supervising after transient API errors
+                error_count += 1
+                last_status = f"clock_error: {exc}"
+                logger.exception("Scheduler Alpaca clock check failed: %s", exc)
+                if args.send_discord:
+                    _send_scheduler_error(notifier, logger, phase="clock", error=str(exc))
+                if args.once:
+                    return 1
+            else:
+                market_open = args.ignore_market_hours or bool(clock.get("is_open"))
+                if market_open:
+                    cycle_count += 1
+                    cycle_json_output = _scheduler_cycle_json_output(args, now)
+                    cycle_args = _scheduler_cycle_args(args, cycle_json_output)
+                    logger.info(
+                        "Scheduler running cycle %s json_output=%s cycle_discord=%s",
+                        cycle_count,
+                        cycle_json_output or "-",
+                        args.send_cycle_discord,
+                    )
+                    cycle_code = run_cycle(cycle_args)
+                    if cycle_code == 0:
+                        last_status = f"cycle_ok count={cycle_count}"
+                    else:
+                        error_count += 1
+                        last_status = f"cycle_failed code={cycle_code}"
+                        if args.send_discord:
+                            _send_scheduler_error(
+                                notifier,
+                                logger,
+                                phase="run-cycle",
+                                error=f"run-cycle exited with code {cycle_code}",
+                            )
+                else:
+                    skipped_count += 1
+                    last_status = (
+                        f"market_closed next_open={clock.get('next_open')} next_close={clock.get('next_close')}"
+                    )
+                    logger.info("Scheduler skipped cycle because Alpaca market is closed: %s", last_status)
+
+            if args.once:
+                break
+
+            if (
+                args.send_discord
+                and next_heartbeat_at is not None
+                and time.monotonic() >= next_heartbeat_at
+            ):
+                _send_scheduler_heartbeat(
+                    notifier,
+                    logger,
+                    status="running",
+                    interval_minutes=interval_minutes,
+                    heartbeat_minutes=heartbeat_minutes,
+                    details=(
+                        f"{last_status}; cycles={cycle_count}; skipped={skipped_count}; "
+                        f"errors={error_count}"
+                    ),
+                )
+                next_heartbeat_at = time.monotonic() + heartbeat_minutes * 60
+
+            time.sleep(interval_minutes * 60)
+    except KeyboardInterrupt:
+        last_status = "stopped_by_keyboard_interrupt"
+        logger.info("Local scheduler stopped by keyboard interrupt")
+
+    final_status = "ok" if error_count == 0 else "completed_with_errors"
+    if args.once:
+        final_status = last_status if error_count else "ok"
+    record_bot_run(
+        db_path,
+        started_at=datetime.now(UTC).isoformat(),
+        mode=config.mode,
+        status=final_status,
+        details={
+            "command": "schedule-local",
+            "cycles": cycle_count,
+            "skipped": skipped_count,
+            "errors": error_count,
+            "last_status": last_status,
+        },
+    )
+    if args.send_discord:
+        _send_scheduler_heartbeat(
+            notifier,
+            logger,
+            status="stopped" if not args.once else "completed once",
+            interval_minutes=interval_minutes,
+            heartbeat_minutes=heartbeat_minutes,
+            details=(
+                f"{last_status}; cycles={cycle_count}; skipped={skipped_count}; "
+                f"errors={error_count}"
+            ),
+        )
+    return 0 if error_count == 0 else 1
 
 
 def _run_cycle_with_lock(
@@ -868,6 +1093,87 @@ def _release_run_cycle_lock(handle: TextIO, logger: logging.Logger) -> None:
     finally:
         handle.close()
     logger.info("Released run-cycle lock at %s", lock_path)
+
+
+def _scheduler_interval_minutes(args: argparse.Namespace, config) -> float:
+    if args.interval_minutes is not None:
+        return float(args.interval_minutes)
+    return float(config.get("runtime", "scheduler_interval_minutes", default=3))
+
+
+def _scheduler_heartbeat_minutes(args: argparse.Namespace, config) -> float:
+    if args.heartbeat_minutes is not None:
+        return float(args.heartbeat_minutes)
+    return float(config.get("runtime", "scheduler_heartbeat_minutes", default=60))
+
+
+def _scheduler_cycle_json_output(args: argparse.Namespace, now: datetime) -> str | None:
+    if not args.json_output_dir:
+        return None
+    output_dir = resolve_path(args.json_output_dir)
+    timestamp = now.strftime("%Y%m%dT%H%M%SZ")
+    return str(output_dir / f"run_cycle_{timestamp}.json")
+
+
+def _scheduler_cycle_args(args: argparse.Namespace, json_output: str | None) -> argparse.Namespace:
+    return argparse.Namespace(
+        command="run-cycle",
+        settings=args.settings,
+        env=args.env,
+        symbols=args.symbols,
+        max_candidates=args.max_candidates,
+        option_feed=args.option_feed,
+        send_discord=args.send_cycle_discord,
+        json_output=json_output,
+        mock_decision=args.mock_decision,
+        submit_paper=args.submit_paper,
+    )
+
+
+def _send_scheduler_heartbeat(
+    notifier: DiscordNotifier,
+    logger: logging.Logger,
+    *,
+    status: str,
+    interval_minutes: float,
+    heartbeat_minutes: float,
+    details: str,
+) -> bool:
+    content = (
+        "Local scheduler heartbeat\n"
+        f"Status: {status}\n"
+        f"Interval minutes: {interval_minutes:g}\n"
+        f"Heartbeat minutes: {heartbeat_minutes:g}\n"
+        f"Details: {details}"
+    )
+    result = notifier.send(content)
+    if result.ok:
+        logger.info("Discord scheduler heartbeat sent: %s", status)
+        return True
+
+    logger.error("Discord scheduler heartbeat failed: %s", result.error)
+    return False
+
+
+def _send_scheduler_error(
+    notifier: DiscordNotifier,
+    logger: logging.Logger,
+    *,
+    phase: str,
+    error: str,
+) -> bool:
+    content = (
+        "Local scheduler error\n"
+        f"Phase: {phase}\n"
+        f"Error: {error}"
+    )
+    result = notifier.send(content)
+    if result.ok:
+        logger.info("Discord scheduler error sent: phase=%s", phase)
+        return True
+
+    logger.error("Discord scheduler error failed: %s", result.error)
+    return False
 
 
 def _maybe_send_discord(

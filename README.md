@@ -106,9 +106,28 @@ Test the same cycle without calling OpenAI:
 uv run trading-bot run-cycle --symbols AAPL,MSFT --max-candidates 3 --mock-decision skip
 ```
 
+Run the local scheduler during US market hours. It defaults to one scheduler
+check every 3 minutes and one heartbeat every 60 minutes:
+
+```bash
+uv run trading-bot schedule-local --send-discord --json-output-dir data/scheduler_cycles
+```
+
+Validate one scheduler check safely without OpenAI:
+
+```bash
+uv run trading-bot schedule-local --symbols AAPL --max-candidates 1 --mock-decision skip --send-discord --json-output-dir data/scheduler_cycles --once
+```
+
+Use `--send-cycle-discord` only when you want every scheduled cycle to also send
+the full run-cycle decision summary.
+
 The decision packet includes account/position/order state, option candidates,
 intraday move, 30-minute moving-average trend context, option quote freshness,
 and recent Alpaca/Benzinga news.
+
+`decision_engine.reasoning_effort` controls GPT reasoning effort. The default is
+`medium`; set it to `high` only when the higher output-token cost is worth it.
 
 Test the same decision path without calling OpenAI:
 
@@ -129,8 +148,8 @@ Compile-check the package:
 uv run python -m compileall src tests
 ```
 
-The next milestone is scheduling `run-cycle` locally every minute during market
-hours, with Discord heartbeat/error notifications.
+The next milestone is reducing repeated LLM cost by running cheap monitoring
+more often than expensive open-decision scans.
 
 ## First Local Checklist
 

@@ -19,6 +19,7 @@ class OpenAIClientError(RuntimeError):
 class OpenAIClient:
     api_key: str
     model: str
+    reasoning_effort: str | None = None
     base_url: str = "https://api.openai.com/v1"
     timeout_seconds: float = 60.0
 
@@ -31,10 +32,20 @@ class OpenAIClient:
         model = os.environ.get("OPENAI_MODEL") or str(
             config.get("decision_engine", "model", default="gpt-5.5")
         )
+        reasoning_effort = os.environ.get("OPENAI_REASONING_EFFORT") or config.get(
+            "decision_engine",
+            "reasoning_effort",
+            default=None,
+        )
         base_url = str(
             config.get("decision_engine", "openai_base_url", default="https://api.openai.com/v1")
         ).rstrip("/")
-        return cls(api_key=api_key, model=model, base_url=base_url)
+        return cls(
+            api_key=api_key,
+            model=model,
+            reasoning_effort=str(reasoning_effort) if reasoning_effort else None,
+            base_url=base_url,
+        )
 
     def create_trading_decision(
         self,
@@ -67,6 +78,8 @@ class OpenAIClient:
                 }
             },
         }
+        if self.reasoning_effort:
+            request_payload["reasoning"] = {"effort": self.reasoning_effort}
 
         response_json = self._post("/responses", request_payload)
         output_text = _extract_output_text(response_json)
@@ -129,4 +142,3 @@ def _extract_output_text(response_json: dict[str, Any]) -> str:
     if not output_text:
         raise OpenAIClientError("OpenAI response output text was empty")
     return output_text
-
