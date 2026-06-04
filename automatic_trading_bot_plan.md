@@ -1073,17 +1073,17 @@ Ops:
 
 ## 13. Immediate Next Step
 
-Add a disabled-by-default paper execution gate for allocator-selected `open` decisions.
+Add a position monitor and exit planner for paper positions.
 
 Recommended next implementation order:
 
-1. Add explicit execution config flags, e.g. `execution.enable_paper_orders: false`.
-2. Add paper-only Alpaca order submission code behind that disabled flag.
-3. Add final pre-submit checks: kill switch, Discord configured, order preview has no errors, max open risk budget remains available.
-4. Add scheduled macro-event placeholders for CPI, FOMC, and major jobs reports.
-5. Replace manual paper-mode earnings dates with an external earnings/calendar provider before live trading.
+1. Add read-only position classification for open option legs.
+2. Reconstruct known put credit spreads from Alpaca positions.
+3. Add mark-to-market spread value and P&L context.
+4. Ask the LLM for `hold` or `close` decisions per open spread.
+5. Keep close-order submission disabled until the close preview path is implemented and tested.
 
-The next milestone is still not automatic live order placement. The next milestone is "paper order submission exists, but is disabled by default and requires an explicit config flag."
+The next milestone is not live trading. The next milestone is "the bot can monitor paper positions and produce read-only close previews."
 
 ## 14. Execution Progress
 
@@ -1137,12 +1137,19 @@ Completed:
 - Added read-only Alpaca MLeg order preview payloads for validator-accepted `open` decisions.
 - Added allocator-selected `selected_order_preview` to watchlist decision artifacts.
 - Added Discord preview status for single-symbol and watchlist decision summaries.
+- Added `execution.enable_paper_orders: false` as the default paper execution lock.
+- Added `--submit-paper` to `decide-watchlist` as the CLI execution-intent lock.
+- Added Alpaca paper order submission method, gated behind final execution checks.
+- Added final paper execution gate checks for mode, config flag, kill switch, Discord config, preview errors, MLeg limit payload, duplicate open orders, max open positions, and max open risk.
+- Added SQLite `execution_attempts` logging for blocked, broker-error, and submitted attempts.
+- Added Discord execution status for watchlist decision summaries.
 - Added unit tests for config loading and put credit spread candidate construction.
 - Added unit tests for LLM decision packet construction and validator rejection paths.
 - Added unit test for stale market data blocking `market_trend_ok`.
 - Added unit tests for candidate liquidity fields, earnings/event blocking, and high-risk news blocking.
 - Added unit tests for deterministic allocator selection.
 - Added unit tests for put credit spread MLeg order preview payloads.
+- Added unit tests for the disabled-by-default paper execution gate and execution-attempt logging.
 - Updated paper-mode option data feed to `indicative` because Alpaca returned `OPRA agreement is not signed`.
 - Kept `opra` as the required live-mode target feed before real options execution.
 
@@ -1163,6 +1170,7 @@ Verified:
 - `uv run trading-bot decide-watchlist --symbols AAPL,MSFT --max-candidates 3 --mock-decision skip --json-output data/last_decide_watchlist_mock.json`
 - `uv run trading-bot decide-watchlist --symbols AAPL,MSFT --max-candidates 10 --json-output data/last_decide_watchlist_openai_smoke.json`
 - `uv run trading-bot decide-watchlist --max-candidates 20 --send-discord --json-output data/last_decision_watchlist_with_preview.json`
+- `uv run trading-bot decide-watchlist --symbols AAPL --max-candidates 1 --mock-decision skip --submit-paper --json-output data/last_submit_paper_blocked_mock.json`
 - `uv run python -m unittest discover -s tests`
 - `uv run python -m compileall src tests`
 - `git diff --check`
@@ -1182,6 +1190,7 @@ Current known state:
 - Independent per-symbol watchlist decisions work in mock mode and produce one allocator summary.
 - The allocator currently ranks accepted opens by confidence, then reward/risk, then max profit.
 - Read-only Alpaca MLeg order previews are generated for validator-accepted `open` decisions.
+- Paper order submission code exists but is blocked by default unless both `--submit-paper` and `execution.enable_paper_orders: true` are present.
 - External earnings/calendar provider integration is still not implemented.
 - The latest real LLM decision accepted by the validator is an `open` recommendation for a read-only META put credit spread: `META-2026-06-12-597.50P-592.50P`, quantity 1, credit limit `-1.02`, max loss USD 398.
 - OPRA is not currently enabled because the OPRA agreement is not signed.

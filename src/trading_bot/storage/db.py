@@ -75,6 +75,25 @@ def init_db(db_path: Path) -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS execution_attempts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                mode TEXT NOT NULL,
+                decision_id INTEGER,
+                requested INTEGER NOT NULL,
+                submitted INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                order_preview_json TEXT NOT NULL,
+                order_payload_json TEXT NOT NULL,
+                broker_response_json TEXT NOT NULL,
+                broker_error TEXT,
+                block_reasons_json TEXT NOT NULL,
+                FOREIGN KEY (decision_id) REFERENCES llm_decisions(id)
+            )
+            """
+        )
         conn.commit()
 
 
@@ -186,6 +205,51 @@ def record_llm_decision(
                 json.dumps(raw_response, sort_keys=True),
                 json.dumps(validator_errors, sort_keys=True),
                 0 if validator_errors else 1,
+            ),
+        )
+        conn.commit()
+        return int(cursor.lastrowid)
+
+
+def record_execution_attempt(
+    db_path: Path,
+    *,
+    created_at: str,
+    mode: str,
+    decision_id: int | None,
+    attempt: Any,
+) -> int:
+    attempt_dict = attempt.to_dict() if hasattr(attempt, "to_dict") else dict(attempt)
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO execution_attempts (
+                created_at,
+                mode,
+                decision_id,
+                requested,
+                submitted,
+                status,
+                order_preview_json,
+                order_payload_json,
+                broker_response_json,
+                broker_error,
+                block_reasons_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                created_at,
+                mode,
+                decision_id,
+                1 if attempt_dict.get("requested") else 0,
+                1 if attempt_dict.get("submitted") else 0,
+                str(attempt_dict.get("status")),
+                json.dumps(attempt_dict.get("order_preview"), sort_keys=True),
+                json.dumps(attempt_dict.get("order_payload"), sort_keys=True),
+                json.dumps(attempt_dict.get("broker_response"), sort_keys=True),
+                attempt_dict.get("broker_error"),
+                json.dumps(attempt_dict.get("block_reasons", []), sort_keys=True),
             ),
         )
         conn.commit()

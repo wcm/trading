@@ -61,6 +61,12 @@ class AlpacaClient:
             raise BrokerError("Expected Alpaca orders response to be a list")
         return data
 
+    def submit_order(self, payload: dict[str, Any]) -> dict[str, Any]:
+        data = self._post("/v2/orders", json_payload=payload)
+        if not isinstance(data, dict):
+            raise BrokerError("Expected Alpaca order submission response to be an object")
+        return data
+
     def get_latest_stock_bars(self, symbols: list[str], *, feed: str = "iex") -> dict[str, Any]:
         data = self._get_data(
             "/v2/stocks/bars/latest",
@@ -194,18 +200,30 @@ class AlpacaClient:
     def _get_data(self, path: str, params: dict[str, str] | None = None) -> Any:
         return self._request("GET", f"{self.data_base_url}{path}", params=params)
 
-    def _request(self, method: str, url: str, params: dict[str, str] | None = None) -> Any:
+    def _post(self, path: str, json_payload: dict[str, Any]) -> Any:
+        return self._request("POST", f"{self.base_url}{path}", json_payload=json_payload)
+
+    def _request(
+        self,
+        method: str,
+        url: str,
+        params: dict[str, str] | None = None,
+        json_payload: dict[str, Any] | None = None,
+    ) -> Any:
         headers = {
             "APCA-API-KEY-ID": self.key_id,
             "APCA-API-SECRET-KEY": self.secret_key,
             "Accept": "application/json",
         }
+        if json_payload is not None:
+            headers["Content-Type"] = "application/json"
         try:
             response = httpx.request(
                 method,
                 url,
                 headers=headers,
                 params=params,
+                json=json_payload,
                 timeout=self.timeout_seconds,
             )
             response.raise_for_status()

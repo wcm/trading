@@ -107,6 +107,7 @@ decision_engine:
   allow_no_trade_decision: true
 
 execution:
+  enable_paper_orders: false
   order_type: limit
   entry_order_timeout_seconds: 60
   max_entry_price_adjustments: 3

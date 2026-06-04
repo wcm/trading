@@ -67,7 +67,15 @@ Run independent per-symbol decisions across the watchlist and let the determinis
 uv run trading-bot decide-watchlist --max-candidates 20 --send-discord --json-output data/last_decision_watchlist.json
 ```
 
-Accepted `open` decisions include a read-only Alpaca MLeg order preview in the JSON artifact. The preview contains the `/v2/orders` payload, but the bot does not submit it.
+Accepted `open` decisions include a read-only Alpaca MLeg order preview in the JSON artifact. The preview contains the `/v2/orders` payload.
+
+Paper order submission has two locks and is disabled by default:
+
+```bash
+uv run trading-bot decide-watchlist --max-candidates 20 --submit-paper --send-discord
+```
+
+The command above still refuses to submit unless `execution.enable_paper_orders: true` is set in `config/settings.yaml`.
 
 The decision packet includes account/position/order state, option candidates,
 intraday move, 30-minute moving-average trend context, option quote freshness,

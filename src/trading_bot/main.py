@@ -13,6 +13,7 @@ from trading_bot.config import load_config, load_env_file, resolve_path
 from trading_bot.data.events import build_event_context
 from trading_bot.data.market_data import build_market_context
 from trading_bot.data.news import build_news_context
+from trading_bot.execution.gate import maybe_submit_paper_order
 from trading_bot.execution.orders import build_client_order_id, build_put_credit_spread_order_preview
 from trading_bot.llm.decision import build_decision_packet, candidate_dicts_by_id, packet_candidate_ids
 from trading_bot.llm.openai_client import OpenAIClient, OpenAIClientError
@@ -20,7 +21,13 @@ from trading_bot.llm.schemas import validate_decision_payload
 from trading_bot.logging_config import configure_logging
 from trading_bot.notifications.discord import DiscordNotifier
 from trading_bot.risk.kill_switch import KillSwitch
-from trading_bot.storage.db import init_db, record_bot_run, record_llm_decision, record_option_scan
+from trading_bot.storage.db import (
+    init_db,
+    record_bot_run,
+    record_execution_attempt,
+    record_llm_decision,
+    record_option_scan,
+)
 from trading_bot.strategy.put_credit_spread import scan_put_credit_spreads
 
 
@@ -139,6 +146,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--mock-decision",
         choices=["skip", "disable_trading"],
         help="Use local mock decisions instead of calling OpenAI.",
+    )
+    decide_watchlist.add_argument(
+        "--submit-paper",
+        action="store_true",
+        help="Request paper order submission for the allocator-selected open. Requires execution.enable_paper_orders=true.",
     )
 
     return parser
@@ -413,6 +425,45 @@ def run_watchlist_decisions(args: argparse.Namespace) -> int:
     successful_decisions = [item for item in per_symbol if item.get("decision")]
     allocation = build_allocation_summary(config, decision_artifacts)
     selected_order_preview = _selected_order_preview(decision_artifacts, allocation.get("selected_open"))
+    execution_attempt = None
+    execution_attempt_id = None
+    if args.submit_paper or selected_order_preview:
+        state_refresh_error = None
+        try:
+            final_open_orders = alpaca.get_orders(status="open")
+            final_positions = alpaca.get_positions()
+        except Exception as exc:  # noqa: BLE001 - final execution guard must fail closed
+            logger.exception("Final execution state refresh failed: %s", exc)
+            state_refresh_error = str(exc)
+            final_open_orders = []
+            final_positions = []
+        execution_attempt = maybe_submit_paper_order(
+            config=config,
+            alpaca=alpaca,
+            kill_switch=kill_switch,
+            notifier=notifier,
+            submit_requested=args.submit_paper,
+            order_preview=selected_order_preview,
+            open_orders=final_open_orders,
+            open_positions=final_positions,
+            allocation=allocation,
+            state_refresh_error=state_refresh_error,
+        )
+        selected_decision_id = (allocation.get("selected_open") or {}).get("decision_id")
+        execution_attempt_id = record_execution_attempt(
+            db_path,
+            created_at=datetime.now(UTC).isoformat(),
+            mode=config.mode,
+            decision_id=selected_decision_id if isinstance(selected_decision_id, int) else None,
+            attempt=execution_attempt,
+        )
+        logger.info(
+            "Paper execution gate status=%s submitted=%s attempt_id=%s block_reasons=%s",
+            execution_attempt.status,
+            execution_attempt.submitted,
+            execution_attempt_id,
+            "; ".join(execution_attempt.block_reasons) if execution_attempt.block_reasons else "-",
+        )
     combined_artifact = {
         "generated_at": datetime.now(UTC).isoformat(),
         "mode": config.mode,
@@ -420,6 +471,8 @@ def run_watchlist_decisions(args: argparse.Namespace) -> int:
         "per_symbol": per_symbol,
         "allocation": allocation,
         "selected_order_preview": selected_order_preview,
+        "execution_attempt_id": execution_attempt_id,
+        "execution_attempt": execution_attempt.to_dict() if execution_attempt else None,
     }
 
     logger.info(
@@ -778,6 +831,7 @@ def _send_watchlist_decision_summary(
     allocation = artifact["allocation"]
     selected = allocation.get("selected_open")
     selected_preview = artifact.get("selected_order_preview")
+    execution_attempt = artifact.get("execution_attempt")
     selected_line = (
         f"{selected['symbol']} {selected['candidate_id']} limit {selected['limit_price']} "
         f"max_loss {selected['max_loss']}"
@@ -800,6 +854,7 @@ def _send_watchlist_decision_summary(
         f"Accepted opens: {allocation['accepted_open_count']}\n"
         f"Selected open: {selected_line}\n"
         f"Order preview: {_preview_status(selected_preview)}\n"
+        f"Execution: {_execution_status(execution_attempt)}\n"
         + "\n".join(symbol_lines[:12])
     )
     result = notifier.send(content)
@@ -818,6 +873,20 @@ def _preview_status(order_preview: dict[str, Any] | None) -> str:
     if errors:
         return f"errors={len(errors)}"
     return "ready"
+
+
+def _execution_status(execution_attempt: dict[str, Any] | None) -> str:
+    if not execution_attempt:
+        return "not attempted"
+    status = execution_attempt.get("status")
+    submitted = execution_attempt.get("submitted")
+    reasons = execution_attempt.get("block_reasons") or []
+    if reasons:
+        return f"{status}, submitted={submitted}, first_block={reasons[0]}"
+    broker_error = execution_attempt.get("broker_error")
+    if broker_error:
+        return f"{status}, submitted={submitted}, broker_error={str(broker_error)[:120]}"
+    return f"{status}, submitted={submitted}"
 
 
 if __name__ == "__main__":
