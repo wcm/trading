@@ -1073,17 +1073,17 @@ Ops:
 
 ## 13. Immediate Next Step
 
-Add a unified `run-cycle` command that monitors positions before considering new opens.
+Schedule the unified `run-cycle` command locally during market hours.
 
 Recommended next implementation order:
 
-1. Run `monitor-positions` first inside the cycle.
-2. If any spread has `close_recommended=true`, send alert/preview and skip new opens for that cycle.
-3. If no urgent close exists, run independent watchlist decisions.
-4. If an open is selected, use the existing guarded paper execution path.
-5. Add a process lock so only one cycle can run at once.
+1. Add a local scheduler wrapper around `uv run trading-bot run-cycle`.
+2. Run it once per minute only during US regular market hours.
+3. Send a Discord heartbeat when the scheduler starts and stops.
+4. Send a Discord error alert when a cycle fails.
+5. Keep the existing process lock so only one cycle can run at once.
 
-The next milestone is not live trading. The next milestone is "one local bot loop can run monitor-before-open safely."
+The next milestone is not live trading. The next milestone is "one local bot can run repeated paper cycles safely while supervised."
 
 ## 14. Execution Progress
 
@@ -1148,6 +1148,12 @@ Completed:
 - Added quote-based close debit, estimated spread P&L, and hard exit flags.
 - Added read-only close MLeg previews: buy short put to close, sell long put to close.
 - Added Discord position monitor summary support.
+- Added unified `run-cycle` command that monitors positions before considering new opens.
+- Added run-cycle behavior that skips new open decisions when any spread has `close_recommended=true`.
+- Added run-cycle reuse of independent watchlist decisions, allocator selection, and the existing guarded paper execution path.
+- Added a non-overlap process lock for `run-cycle`.
+- Added explicit `runtime.cycle_lock_path` config.
+- Added one-message Discord summary support for full run cycles.
 - Added unit tests for config loading and put credit spread candidate construction.
 - Added unit tests for LLM decision packet construction and validator rejection paths.
 - Added unit test for stale market data blocking `market_trend_ok`.
@@ -1156,6 +1162,7 @@ Completed:
 - Added unit tests for put credit spread MLeg order preview payloads.
 - Added unit tests for the disabled-by-default paper execution gate and execution-attempt logging.
 - Added unit tests for option symbol parsing, position monitoring, P&L marking, profit-target flags, and close previews.
+- Added unit tests for run-cycle argument parsing, close-before-open gating, and Discord cycle summaries.
 - Updated paper-mode option data feed to `indicative` because Alpaca returned `OPRA agreement is not signed`.
 - Kept `opra` as the required live-mode target feed before real options execution.
 
@@ -1178,6 +1185,8 @@ Verified:
 - `uv run trading-bot decide-watchlist --max-candidates 20 --send-discord --json-output data/last_decision_watchlist_with_preview.json`
 - `uv run trading-bot decide-watchlist --symbols AAPL --max-candidates 1 --mock-decision skip --submit-paper --json-output data/last_submit_paper_blocked_mock.json`
 - `uv run trading-bot monitor-positions --send-discord --json-output data/last_position_monitor.json`
+- `uv run trading-bot run-cycle --symbols AAPL,MSFT --max-candidates 1 --mock-decision skip --json-output data/last_run_cycle_mock.json`
+- `uv run trading-bot run-cycle --symbols AAPL,MSFT --max-candidates 1 --mock-decision skip --send-discord --json-output data/last_run_cycle_mock_discord.json`
 - `uv run python -m unittest discover -s tests`
 - `uv run python -m compileall src tests`
 - `git diff --check`
@@ -1199,20 +1208,21 @@ Current known state:
 - Read-only Alpaca MLeg order previews are generated for validator-accepted `open` decisions.
 - Paper order submission code exists but is blocked by default unless both `--submit-paper` and `execution.enable_paper_orders: true` are present.
 - Read-only position monitoring works and generates close previews for reconstructed put credit spreads.
+- `run-cycle` works as the intended local loop: monitor first, close alerts before opens, then watchlist decisions if safe to look for new entries.
 - External earnings/calendar provider integration is still not implemented.
 - The latest real LLM decision accepted by the validator is an `open` recommendation for a read-only META put credit spread: `META-2026-06-12-597.50P-592.50P`, quantity 1, credit limit `-1.02`, max loss USD 398.
 - OPRA is not currently enabled because the OPRA agreement is not signed.
-- No order placement is implemented yet.
+- No actual paper or live order has been submitted by the bot yet.
 
 Recent commits:
 
-- `79e6b63 Add trading bot MVP plan`
-- `070e0d7 Update plan for paper and local-first rollout`
-- `9e98009 Scaffold local paper trading bot`
-- `a03ee93 Add read-only option spread scanner`
-- `e301743 Update plan execution progress`
+- `e6a1747 Add per-symbol watchlist decisions`
+- `b86512a Add read-only MLeg order previews`
+- `9b61bbd Add guarded paper execution path`
+- `ec06b6f Add read-only position monitor`
 
 Latest milestone:
 
-- Add read-only LLM decision pipeline
-- Add market/news/event/liquidity context and hard validator gates
+- Add unified monitor-before-open `run-cycle`
+- Keep close recommendations higher priority than new open decisions
+- Keep guarded paper open execution disabled by default

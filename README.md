@@ -2,16 +2,19 @@
 
 Local-first, paper-first options trading bot experiment.
 
-The current milestone is a local paper-mode smoke test:
+The current milestone is one local paper-mode bot cycle:
 
 - load config from `config/settings.yaml`
 - load secrets from `.env`
 - initialize logs and SQLite storage
 - check the kill switch
-- optionally send a Discord startup message
-- optionally read Alpaca paper account/clock/positions
+- monitor existing option positions first
+- skip new opens if a spread should be closed
+- otherwise run independent watchlist decisions
+- optionally send Discord summaries
 
-No order placement is implemented yet.
+Paper order submission exists for allocator-selected opens, but it is disabled
+unless both the CLI flag and config lock are enabled.
 
 ## Setup
 
@@ -25,7 +28,7 @@ Fill `.env` with:
 - `ALPACA_API_KEY_ID`
 - `ALPACA_API_SECRET_KEY`
 - `DISCORD_WEBHOOK_URL`
-- `OPENAI_API_KEY` later, once the LLM decision step is wired
+- `OPENAI_API_KEY`
 
 ## Smoke Tests
 
@@ -83,6 +86,23 @@ Monitor existing paper option positions and generate read-only close previews:
 uv run trading-bot monitor-positions --send-discord --json-output data/last_position_monitor.json
 ```
 
+Run one full local bot cycle. This monitors existing positions first, skips new
+open decisions when any spread has a close recommendation, and otherwise runs
+the watchlist decision/allocation path:
+
+```bash
+uv run trading-bot run-cycle --max-candidates 20 --send-discord --json-output data/last_run_cycle.json
+```
+
+`run-cycle` uses `runtime.cycle_lock_path` so overlapping scheduled cycles
+refuse to start.
+
+Test the same cycle without calling OpenAI:
+
+```bash
+uv run trading-bot run-cycle --symbols AAPL,MSFT --max-candidates 3 --mock-decision skip
+```
+
 The decision packet includes account/position/order state, option candidates,
 intraday move, 30-minute moving-average trend context, option quote freshness,
 and recent Alpaca/Benzinga news.
@@ -106,7 +126,8 @@ Compile-check the package:
 uv run python -m compileall src tests
 ```
 
-The bot refuses to place orders at this stage. The next milestone is a read-only Alpaca multi-leg order preview for allocator-selected `open` decisions.
+The next milestone is scheduling `run-cycle` locally every minute during market
+hours, with Discord heartbeat/error notifications.
 
 ## First Local Checklist
 

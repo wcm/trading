@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import argparse
-import logging
 import json
+import logging
+import os
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 from trading_bot.allocation import build_allocation_summary
 from trading_bot.brokers.alpaca import AlpacaClient, AlpacaCredentialsError
@@ -173,6 +174,45 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional path to write the position monitor artifact JSON.",
     )
 
+    cycle = subparsers.add_parser(
+        "run-cycle",
+        help="Run one monitor-before-open bot cycle.",
+    )
+    cycle.add_argument(
+        "--symbols",
+        help="Comma-separated symbols. Defaults to strategy.watchlist.",
+    )
+    cycle.add_argument(
+        "--max-candidates",
+        type=int,
+        default=20,
+        help="Maximum candidates to pass to each per-symbol LLM decision when opens are allowed.",
+    )
+    cycle.add_argument(
+        "--option-feed",
+        choices=["indicative", "opra"],
+        help="Override Alpaca option data feed for this cycle.",
+    )
+    cycle.add_argument(
+        "--send-discord",
+        action="store_true",
+        help="Send one Discord summary for the full cycle.",
+    )
+    cycle.add_argument(
+        "--json-output",
+        help="Optional path to write the combined cycle artifact JSON.",
+    )
+    cycle.add_argument(
+        "--mock-decision",
+        choices=["skip", "disable_trading"],
+        help="Use local mock decisions instead of calling OpenAI when opens are allowed.",
+    )
+    cycle.add_argument(
+        "--submit-paper",
+        action="store_true",
+        help="Request paper order submission for an allocator-selected open. Requires execution.enable_paper_orders=true.",
+    )
+
     return parser
 
 
@@ -194,6 +234,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_watchlist_decisions(args)
     if args.command == "monitor-positions":
         return run_position_monitor(args)
+    if args.command == "run-cycle":
+        return run_cycle(args)
 
     parser.error(f"Unknown command: {args.command}")
     return 2
@@ -407,6 +449,189 @@ def run_watchlist_decisions(args: argparse.Namespace) -> int:
         logger.error("No symbols configured for watchlist decision run")
         return 1
 
+    combined_artifact, successful_count = _build_watchlist_decision_run(
+        config=config,
+        logger=logger,
+        db_path=db_path,
+        kill_switch=kill_switch,
+        notifier=notifier,
+        alpaca=alpaca,
+        symbols=symbols,
+        max_candidates=args.max_candidates,
+        option_feed=args.option_feed,
+        mock_decision=args.mock_decision,
+        submit_requested=args.submit_paper,
+    )
+
+    if args.json_output:
+        _write_json_artifact(args.json_output, combined_artifact, logger, "watchlist decision")
+
+    if args.send_discord:
+        discord_ok = _send_watchlist_decision_summary(notifier, combined_artifact, logger)
+        if not discord_ok:
+            return 1
+
+    return 0 if successful_count else 1
+
+
+def run_cycle(args: argparse.Namespace) -> int:
+    started_at = datetime.now(UTC).isoformat()
+    config, logger, db_path, kill_switch, notifier = bootstrap(args)
+    logger.info("Starting unified monitor-before-open run cycle")
+
+    lock_handle = _acquire_run_cycle_lock(config, logger)
+    if lock_handle is None:
+        record_bot_run(
+            db_path,
+            started_at=started_at,
+            mode=config.mode,
+            status="locked",
+            details={"command": "run-cycle", "reason": "another cycle is already running"},
+        )
+        return 1
+
+    try:
+        return _run_cycle_with_lock(
+            args=args,
+            config=config,
+            logger=logger,
+            db_path=db_path,
+            kill_switch=kill_switch,
+            notifier=notifier,
+            started_at=started_at,
+        )
+    finally:
+        _release_run_cycle_lock(lock_handle, logger)
+
+
+def _run_cycle_with_lock(
+    *,
+    args: argparse.Namespace,
+    config,
+    logger: logging.Logger,
+    db_path: Path,
+    kill_switch: KillSwitch,
+    notifier: DiscordNotifier,
+    started_at: str,
+) -> int:
+    if kill_switch.is_active():
+        logger.warning("Kill switch is active; monitoring continues, open execution remains blocked")
+
+    try:
+        alpaca = AlpacaClient.from_config(config)
+    except AlpacaCredentialsError as exc:
+        logger.error("%s", exc)
+        record_bot_run(
+            db_path,
+            started_at=started_at,
+            mode=config.mode,
+            status="failed",
+            details={"command": "run-cycle", "error": str(exc)},
+        )
+        return 1
+
+    try:
+        monitor_result = monitor_put_credit_spreads(
+            config=config,
+            alpaca=alpaca,
+            option_feed=args.option_feed,
+        )
+    except Exception as exc:  # noqa: BLE001 - report broker/API errors cleanly in CLI
+        logger.exception("Run cycle position monitor failed: %s", exc)
+        record_bot_run(
+            db_path,
+            started_at=started_at,
+            mode=config.mode,
+            status="failed",
+            details={"command": "run-cycle", "phase": "monitor", "error": str(exc)},
+        )
+        return 1
+
+    _log_position_monitor_result(logger, monitor_result)
+    monitor_artifact = monitor_result.to_dict()
+    close_recommended_spreads = _close_recommended_spreads(monitor_artifact)
+    watchlist_artifact = None
+    successful_count = 0
+    skipped_open_reason = None
+    cycle_status = "ok"
+    phase = "monitor_then_open"
+
+    if close_recommended_spreads:
+        phase = "monitor_close_alert"
+        skipped_open_reason = (
+            f"{len(close_recommended_spreads)} existing spread(s) have close_recommended=true"
+        )
+        cycle_status = "close_recommended"
+        logger.warning("Skipping new open decisions: %s", skipped_open_reason)
+    else:
+        symbols = _watchlist_symbols_from_args_or_config(args, config)
+        if not symbols:
+            logger.error("No symbols configured for run cycle")
+            cycle_status = "failed"
+        else:
+            watchlist_artifact, successful_count = _build_watchlist_decision_run(
+                config=config,
+                logger=logger,
+                db_path=db_path,
+                kill_switch=kill_switch,
+                notifier=notifier,
+                alpaca=alpaca,
+                symbols=symbols,
+                max_candidates=args.max_candidates,
+                option_feed=args.option_feed,
+                mock_decision=args.mock_decision,
+                submit_requested=args.submit_paper,
+            )
+            cycle_status = "ok" if successful_count else "failed"
+
+    cycle_artifact = _build_run_cycle_artifact(
+        config=config,
+        phase=phase,
+        monitor_artifact=monitor_artifact,
+        close_recommended_spreads=close_recommended_spreads,
+        watchlist_artifact=watchlist_artifact,
+        skipped_open_reason=skipped_open_reason,
+    )
+
+    if args.json_output:
+        _write_json_artifact(args.json_output, cycle_artifact, logger, "run cycle")
+
+    discord_ok = True
+    if args.send_discord:
+        discord_ok = _send_run_cycle_summary(notifier, cycle_artifact, logger)
+
+    final_status = cycle_status if discord_ok else "failed"
+    record_bot_run(
+        db_path,
+        started_at=started_at,
+        mode=config.mode,
+        status=final_status,
+        details={
+            "command": "run-cycle",
+            "phase": phase,
+            "close_recommended_count": len(close_recommended_spreads),
+            "watchlist_successful_decision_count": successful_count,
+            "discord_requested": args.send_discord,
+            "discord_ok": discord_ok,
+        },
+    )
+    return 0 if final_status in {"ok", "close_recommended"} else 1
+
+
+def _build_watchlist_decision_run(
+    *,
+    config,
+    logger: logging.Logger,
+    db_path: Path,
+    kill_switch: KillSwitch,
+    notifier: DiscordNotifier,
+    alpaca: AlpacaClient,
+    symbols: list[str],
+    max_candidates: int,
+    option_feed: str | None,
+    mock_decision: str | None,
+    submit_requested: bool,
+) -> tuple[dict[str, Any], int]:
     per_symbol: list[dict[str, Any]] = []
     decision_artifacts: list[dict[str, Any]] = []
     for symbol in symbols:
@@ -417,9 +642,9 @@ def run_watchlist_decisions(args: argparse.Namespace) -> int:
                 db_path=db_path,
                 alpaca=alpaca,
                 symbols=[symbol],
-                max_candidates=args.max_candidates,
-                option_feed=args.option_feed,
-                mock_decision=args.mock_decision,
+                max_candidates=max_candidates,
+                option_feed=option_feed,
+                mock_decision=mock_decision,
             )
         except OpenAIClientError as exc:
             logger.error("Decision failed for %s: %s", symbol, exc)
@@ -449,7 +674,7 @@ def run_watchlist_decisions(args: argparse.Namespace) -> int:
     selected_order_preview = _selected_order_preview(decision_artifacts, allocation.get("selected_open"))
     execution_attempt = None
     execution_attempt_id = None
-    if args.submit_paper or selected_order_preview:
+    if submit_requested or selected_order_preview:
         state_refresh_error = None
         try:
             final_open_orders = alpaca.get_orders(status="open")
@@ -464,7 +689,7 @@ def run_watchlist_decisions(args: argparse.Namespace) -> int:
             alpaca=alpaca,
             kill_switch=kill_switch,
             notifier=notifier,
-            submit_requested=args.submit_paper,
+            submit_requested=submit_requested,
             order_preview=selected_order_preview,
             open_orders=final_open_orders,
             open_positions=final_positions,
@@ -504,19 +729,7 @@ def run_watchlist_decisions(args: argparse.Namespace) -> int:
         allocation["accepted_open_count"],
         (allocation["selected_open"] or {}).get("candidate_id"),
     )
-
-    if args.json_output:
-        output_path = resolve_path(args.json_output)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(json.dumps(combined_artifact, indent=2, sort_keys=True), encoding="utf-8")
-        logger.info("Wrote watchlist decision JSON to %s", output_path)
-
-    if args.send_discord:
-        discord_ok = _send_watchlist_decision_summary(notifier, combined_artifact, logger)
-        if not discord_ok:
-            return 1
-
-    return 0 if successful_decisions else 1
+    return combined_artifact, len(successful_decisions)
 
 
 def run_position_monitor(args: argparse.Namespace) -> int:
@@ -541,6 +754,33 @@ def run_position_monitor(args: argparse.Namespace) -> int:
         logger.exception("Position monitor failed: %s", exc)
         return 1
 
+    _log_position_monitor_result(logger, result)
+
+    artifact = result.to_dict()
+    if args.json_output:
+        _write_json_artifact(args.json_output, artifact, logger, "position monitor")
+
+    if args.send_discord:
+        discord_ok = _send_position_monitor_summary(notifier, artifact, logger)
+        if not discord_ok:
+            return 1
+
+    return 0
+
+
+def _write_json_artifact(
+    output_path_value: str,
+    artifact: dict[str, Any],
+    logger: logging.Logger,
+    label: str,
+) -> None:
+    output_path = resolve_path(output_path_value)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(artifact, indent=2, sort_keys=True), encoding="utf-8")
+    logger.info("Wrote %s JSON to %s", label, output_path)
+
+
+def _log_position_monitor_result(logger: logging.Logger, result) -> None:
     logger.info(
         "Position monitor complete: option_positions=%s spreads=%s unpaired_legs=%s",
         result.option_position_count,
@@ -557,19 +797,74 @@ def run_position_monitor(args: argparse.Namespace) -> int:
             ",".join(flag for flag, active in spread.get("exit_flags", {}).items() if active) or "-",
         )
 
-    artifact = result.to_dict()
-    if args.json_output:
-        output_path = resolve_path(args.json_output)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(json.dumps(artifact, indent=2, sort_keys=True), encoding="utf-8")
-        logger.info("Wrote position monitor JSON to %s", output_path)
 
-    if args.send_discord:
-        discord_ok = _send_position_monitor_summary(notifier, artifact, logger)
-        if not discord_ok:
-            return 1
+def _close_recommended_spreads(monitor_artifact: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        spread
+        for spread in monitor_artifact.get("spreads", [])
+        if isinstance(spread, dict) and spread.get("close_recommended") is True
+    ]
 
-    return 0
+
+def _build_run_cycle_artifact(
+    *,
+    config,
+    phase: str,
+    monitor_artifact: dict[str, Any],
+    close_recommended_spreads: list[dict[str, Any]],
+    watchlist_artifact: dict[str, Any] | None,
+    skipped_open_reason: str | None,
+) -> dict[str, Any]:
+    return {
+        "generated_at": datetime.now(UTC).isoformat(),
+        "mode": config.mode,
+        "command": "run-cycle",
+        "phase": phase,
+        "monitor": monitor_artifact,
+        "close_recommended_count": len(close_recommended_spreads),
+        "close_recommended_spreads": close_recommended_spreads,
+        "skipped_open_decisions": bool(skipped_open_reason),
+        "skip_open_reason": skipped_open_reason,
+        "watchlist_decision": watchlist_artifact,
+    }
+
+
+def _acquire_run_cycle_lock(config, logger: logging.Logger) -> TextIO | None:
+    lock_path = resolve_path(config.get("runtime", "cycle_lock_path", default="data/run_cycle.lock"))
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = lock_path.open("a+", encoding="utf-8")
+    try:
+        import fcntl
+
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        handle.seek(0)
+        existing = handle.read().strip()
+        logger.error(
+            "Another run-cycle already holds lock %s%s",
+            lock_path,
+            f" ({existing})" if existing else "",
+        )
+        handle.close()
+        return None
+
+    handle.seek(0)
+    handle.truncate()
+    handle.write(f"pid={os.getpid()} acquired_at={datetime.now(UTC).isoformat()}\n")
+    handle.flush()
+    logger.info("Acquired run-cycle lock at %s", lock_path)
+    return handle
+
+
+def _release_run_cycle_lock(handle: TextIO, logger: logging.Logger) -> None:
+    lock_path = getattr(handle, "name", "run-cycle lock")
+    try:
+        import fcntl
+
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    finally:
+        handle.close()
+    logger.info("Released run-cycle lock at %s", lock_path)
 
 
 def _maybe_send_discord(
@@ -938,6 +1233,72 @@ def _send_watchlist_decision_summary(
         return True
 
     logger.error("Discord watchlist decision summary failed: %s", result.error)
+    return False
+
+
+def _send_run_cycle_summary(
+    notifier: DiscordNotifier,
+    artifact: dict[str, Any],
+    logger: logging.Logger,
+) -> bool:
+    monitor = artifact.get("monitor") or {}
+    close_spreads = artifact.get("close_recommended_spreads") or []
+    lines = [
+        "Bot run cycle complete",
+        f"Phase: {artifact.get('phase')}",
+        f"Option positions: {monitor.get('option_position_count')}",
+        f"Spreads: {monitor.get('spread_count')}",
+        f"Close recommendations: {artifact.get('close_recommended_count')}",
+    ]
+
+    if close_spreads:
+        lines.append(f"Open decisions: skipped ({artifact.get('skip_open_reason')})")
+        for spread in close_spreads[:5]:
+            active_flags = [
+                flag for flag, active in (spread.get("exit_flags") or {}).items() if active
+            ]
+            lines.append(
+                f"- {spread.get('spread_id')}: close_debit={spread.get('close_debit')} "
+                f"pnl={spread.get('estimated_unrealized_pnl')} "
+                f"preview={_preview_status(spread.get('close_order_preview'))} "
+                f"flags={','.join(active_flags) or '-'}"
+            )
+    else:
+        watchlist = artifact.get("watchlist_decision") or {}
+        allocation = watchlist.get("allocation") or {}
+        selected = allocation.get("selected_open")
+        selected_preview = watchlist.get("selected_order_preview")
+        execution_attempt = watchlist.get("execution_attempt")
+        selected_line = (
+            f"{selected['symbol']} {selected['candidate_id']} limit {selected['limit_price']} "
+            f"max_loss {selected['max_loss']}"
+            if selected
+            else "none"
+        )
+        lines.extend(
+            [
+                f"Open symbols: {', '.join(watchlist.get('symbols', []))}",
+                f"Accepted opens: {allocation.get('accepted_open_count')}",
+                f"Selected open: {selected_line}",
+                f"Order preview: {_preview_status(selected_preview)}",
+                f"Execution: {_execution_status(execution_attempt)}",
+            ]
+        )
+        for item in (watchlist.get("per_symbol") or [])[:8]:
+            decision = item.get("decision") or {}
+            action = decision.get("action", "error")
+            reason = item.get("error") or decision.get("decision_reason", "")
+            lines.append(
+                f"- {item.get('symbol')}: {action} candidate={decision.get('candidate_id')} "
+                f"confidence={decision.get('confidence')} reason={str(reason)[:120]}"
+            )
+
+    result = notifier.send("\n".join(lines))
+    if result.ok:
+        logger.info("Discord run-cycle summary sent")
+        return True
+
+    logger.error("Discord run-cycle summary failed: %s", result.error)
     return False
 
 

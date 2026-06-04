@@ -126,4 +126,5 @@ storage:
 
 runtime:
   kill_switch_path: KILL_SWITCH
+  cycle_lock_path: data/run_cycle.lock
   log_dir: logs
