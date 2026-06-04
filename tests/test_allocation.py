@@ -14,7 +14,9 @@ def open_artifact(
     confidence: float,
     max_profit: str,
     max_loss: str,
+    preview_errors: list[str] | None = None,
 ) -> dict:
+    limit_price = "-1.00"
     return {
         "decision_id": decision_id,
         "accepted": True,
@@ -24,9 +26,15 @@ def open_artifact(
             "symbol": symbol,
             "candidate_id": candidate_id,
             "quantity": 1,
-            "limit_price": "-1.00",
+            "limit_price": limit_price,
             "confidence": confidence,
             "decision_reason": f"{symbol} test open",
+        },
+        "order_preview": {
+            "errors": preview_errors or [],
+            "estimated_max_profit": max_profit,
+            "estimated_max_loss": max_loss,
+            "payload": {"limit_price": limit_price},
         },
         "packet": {
             "option_scan": {
@@ -70,6 +78,7 @@ class AllocationTests(unittest.TestCase):
         )
 
         self.assertEqual(summary["accepted_open_count"], 2)
+        self.assertEqual(summary["execution_eligible_open_count"], 2)
         self.assertEqual(summary["selected_open"]["symbol"], "MSFT")
         self.assertEqual(summary["selected_open"]["max_contracts_under_open_risk"], 12)
 
@@ -115,6 +124,37 @@ class AllocationTests(unittest.TestCase):
 
         self.assertEqual(summary["accepted_open_count"], 2)
         self.assertEqual(summary["selected_open"]["symbol"], "OK")
+
+    def test_allocator_falls_back_when_top_open_has_revalidation_error(self) -> None:
+        config = load_config("config/settings.yaml")
+        summary = build_allocation_summary(
+            config,
+            [
+                open_artifact(
+                    symbol="AMZN",
+                    decision_id=1,
+                    candidate_id="AMZN-CANDIDATE",
+                    confidence=0.90,
+                    max_profit="103",
+                    max_loss="397",
+                    preview_errors=["Revalidation: Current spread credit is below minimum"],
+                ),
+                open_artifact(
+                    symbol="NVDA",
+                    decision_id=2,
+                    candidate_id="NVDA-CANDIDATE",
+                    confidence=0.80,
+                    max_profit="113",
+                    max_loss="387",
+                ),
+            ],
+        )
+
+        self.assertEqual(summary["accepted_open_count"], 2)
+        self.assertEqual(summary["execution_eligible_open_count"], 1)
+        self.assertEqual(summary["ranked_opens"][0]["symbol"], "AMZN")
+        self.assertFalse(summary["ranked_opens"][0]["execution_eligible"])
+        self.assertEqual(summary["selected_open"]["symbol"], "NVDA")
 
 
 if __name__ == "__main__":

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import copy
+import logging
 import unittest
 from datetime import UTC, datetime
 
 from trading_bot.config import AppConfig, load_config
+from trading_bot.cycles.run_cycle import _revalidate_open_order_previews
 from trading_bot.execution.entry_orders import manage_entry_order_after_submission
 from trading_bot.execution.revalidation import revalidate_put_credit_spread_entry_preview
 from trading_bot.execution.orders import build_put_credit_spread_order_preview
@@ -155,6 +157,41 @@ class EntryExecutionManagementTests(unittest.TestCase):
         self.assertEqual(len(alpaca.submitted_payloads), 1)
         self.assertEqual(alpaca.submitted_payloads[0]["client_order_id"], "preview-aapl-test-001-r1")
         self.assertEqual(alpaca.submitted_payloads[0]["limit_price"], "-1")
+
+    def test_revalidates_all_accepted_open_previews(self) -> None:
+        config = execution_config(entry_limit_credit_buffer=0.05)
+        preview_one = clean_preview(config)
+        preview_two = clean_preview(config)
+        alpaca = FakeQuoteClient(
+            short_bid="2.00",
+            short_ask="2.05",
+            long_bid="0.95",
+            long_ask="0.97",
+        )
+        artifacts = [
+            {
+                "accepted": True,
+                "decision": {"action": "open"},
+                "order_preview": preview_one,
+            },
+            {
+                "accepted": True,
+                "decision": {"action": "open"},
+                "order_preview": preview_two,
+            },
+        ]
+
+        summary = _revalidate_open_order_previews(
+            config=config,
+            logger=logging.getLogger("test"),
+            alpaca=alpaca,
+            decision_artifacts=artifacts,
+        )
+
+        self.assertEqual(summary["checked_count"], 2)
+        self.assertEqual(summary["eligible_count"], 2)
+        self.assertTrue(artifacts[0]["order_preview"]["revalidation"]["ok"])
+        self.assertTrue(artifacts[1]["order_preview"]["revalidation"]["ok"])
 
 
 if __name__ == "__main__":

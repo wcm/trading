@@ -1087,7 +1087,7 @@ Next milestone: first filled supervised paper order and full paper lifecycle rev
 Build this next:
 
 - Enable paper open execution deliberately for one supervised trade.
-- Use the new pre-submit quote revalidation and entry cancel/replace management.
+- Use fresh quote revalidation for all accepted open candidates before allocation, then the final pre-submit revalidation and entry cancel/replace management.
 - Keep quantity at 1 spread and keep paper execution locks easy to turn off.
 - Watch Discord order lifecycle, position monitor, daily summary, and SQLite logs.
 - Close the spread through the guarded paper close path and review P&L.
@@ -1110,7 +1110,7 @@ Current state:
 - Watchlist decisions can run concurrently up to `decision_engine.max_concurrent_symbols`, currently 8.
 - Alpaca API requests use a 30-second timeout plus two retries for transport failures, rate limits, and 5xx responses.
 - Paper open and close execution paths exist but are disabled by default behind config and CLI locks.
-- Paper entry execution now refreshes selected spread quotes immediately before submit, recalculates bounded limit pricing, polls stale entries, cancels unfilled orders, and can submit limited replacements within configured credit bounds.
+- Paper entry execution now refreshes all accepted open spread quotes before allocation, selects only execution-eligible candidates, refreshes the selected spread again immediately before submit, recalculates bounded limit pricing, polls stale entries, cancels unfilled orders, and can submit limited replacements within configured credit bounds.
 - The scheduler now uses a split cadence: 1-minute checks, monitor-only supervision when positions exist, 5-minute new-open decision cycles, order lifecycle polling each check, and one after-market daily summary.
 - Daily summaries focus on account equity, daily P&L, buying power, open positions, estimated open spread P&L, order lifecycle events, and execution attempts.
 - `main.py` has been refactored into a thin CLI dispatcher with separate modules for parser, bootstrap, commands, run cycles, scheduler, summaries, notifications, order lifecycle, and shared utilities.
@@ -1123,16 +1123,16 @@ Completed milestone groups:
 - Alpaca integration: paper broker client for account, market data, options data, news, positions, orders, single-order lookup/cancel, transient request retries, and MLeg submission payloads.
 - Strategy and data: put credit spread scanner, conservative credit/max-loss math, liquidity checks, trend checks, quote freshness, event/earnings context, and news context.
 - LLM decisioning: OpenAI Responses API, strict JSON schema, prompt versioning, per-symbol watchlist decisions, mock mode, decision persistence, and validator guard rails.
-- Risk and execution gates: max-loss/open-risk checks, symbol/candidate checks, stale-data blocks, pre-submit quote revalidation, default-disabled paper open/close order submission, entry cancel/replace management, and execution-attempt logging.
+- Risk and execution gates: max-loss/open-risk checks, symbol/candidate checks, stale-data blocks, all-candidate fresh quote revalidation, pre-submit quote revalidation, default-disabled paper open/close order submission, entry cancel/replace management, and execution-attempt logging.
 - Monitoring loop: position reconstruction, close previews, P&L estimates, hard exit flags, monitor-before-open `run-cycle`, non-overlap lock, split-cadence local scheduler, and daily trading summary.
 - Notifications: Discord summaries for scans, decisions, run cycles, execution attempts, scheduler heartbeat/errors, order lifecycle changes, and daily P&L/open-position summaries.
-- Tests: unit coverage for scanning, LLM packets, validation, liquidity/events/news blocks, allocation, order previews, execution gates, entry quote revalidation/cancel-replace, position monitoring, run-cycle/scheduler behavior, daily summaries, and order lifecycle polling.
+- Tests: unit coverage for scanning, LLM packets, validation, liquidity/events/news blocks, allocation fallback after revalidation errors, order previews, execution gates, all-candidate entry quote revalidation/cancel-replace, position monitoring, run-cycle/scheduler behavior, daily summaries, and order lifecycle polling.
 
 Latest verification:
 
-- `uv run python -m unittest discover -s tests` passed with 54 tests.
+- `uv run python -m unittest discover -s tests` passed with 56 tests.
 - `uv run python -m compileall src tests` passed.
-- Parallel mock `run-cycle` with real Alpaca data completed successfully for all 8 watchlist symbols without OpenAI calls or order submission.
+- Parallel mock `run-cycle` with real Alpaca data completed successfully for all 8 watchlist symbols without OpenAI calls or order submission after all-candidate fresh quote revalidation changes.
 - Live paper checks confirmed Alpaca connectivity, zero open positions, paper order lifecycle submit/new/cancel handling, daily-summary JSON generation, scheduler one-shot mock validation, smoke CLI validation, and Discord notification delivery.
 
 Known gaps:

@@ -99,10 +99,12 @@ uv run trading-bot decide-watchlist --max-candidates 20 --submit-paper --send-di
 ```
 
 The command above still refuses to submit unless `execution.enable_paper_orders: true` is set in `config/settings.yaml`.
-When paper submission is enabled, the bot refreshes the selected spread quotes
-immediately before submitting, recalculates the credit and max loss, and keeps
-the order as a bounded limit order. Stale unfilled entries are polled, canceled,
-and optionally replaced with a slightly more aggressive credit until
+When paper submission is enabled, the bot refreshes all accepted open spread
+quotes before allocation, filters out accepted opens whose fresh credit no
+longer meets execution rules, refreshes the selected spread again immediately
+before submitting, recalculates the credit and max loss, and keeps the order as
+a bounded limit order. Stale unfilled entries are polled, canceled, and
+optionally replaced with a slightly more aggressive credit until
 `execution.max_entry_price_adjustments` is reached. Market orders remain
 disabled.
 

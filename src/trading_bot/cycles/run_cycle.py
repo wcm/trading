@@ -17,6 +17,7 @@ from trading_bot.data.market_data import build_market_context
 from trading_bot.data.news import build_news_context
 from trading_bot.execution.gate import maybe_submit_paper_close_order, maybe_submit_paper_order
 from trading_bot.execution.orders import build_client_order_id, build_put_credit_spread_order_preview
+from trading_bot.execution.revalidation import revalidate_put_credit_spread_entry_preview
 from trading_bot.llm.decision import build_decision_packet, candidate_dicts_by_id, packet_candidate_ids
 from trading_bot.llm.openai_client import OpenAIClient, OpenAIClientError
 from trading_bot.llm.schemas import validate_decision_payload
@@ -211,6 +212,7 @@ def _build_watchlist_decision_run(
 ) -> tuple[dict[str, Any], int]:
     per_symbol: list[dict[str, Any]] = []
     decision_artifacts: list[dict[str, Any]] = []
+    symbol_entries: dict[str, dict[str, Any]] = {}
     symbol_results = _run_symbol_decisions(
         config=config,
         logger=logger,
@@ -225,11 +227,11 @@ def _build_watchlist_decision_run(
     for symbol in symbols:
         result = symbol_results.get(symbol)
         if result is None:
-            per_symbol.append({"symbol": symbol, "error": "Decision result missing", "accepted": False})
+            symbol_entries[symbol] = {"symbol": symbol, "error": "Decision result missing", "accepted": False}
             continue
         error = result.get("error")
         if error:
-            per_symbol.append({"symbol": symbol, "error": error, "accepted": False})
+            symbol_entries[symbol] = {"symbol": symbol, "error": error, "accepted": False}
             continue
 
         artifact = result["artifact"]
@@ -245,7 +247,25 @@ def _build_watchlist_decision_run(
             len(scan_result.candidates),
         )
         decision_artifacts.append(artifact)
-        per_symbol.append(_compact_watchlist_artifact(symbol, artifact))
+        symbol_entries[symbol] = {"artifact": artifact}
+
+    open_revalidation = _revalidate_open_order_previews(
+        config=config,
+        logger=logger,
+        alpaca=alpaca,
+        decision_artifacts=decision_artifacts,
+    )
+
+    for symbol in symbols:
+        entry = symbol_entries.get(symbol)
+        if not entry:
+            per_symbol.append({"symbol": symbol, "error": "Decision result missing", "accepted": False})
+            continue
+        artifact = entry.get("artifact")
+        if isinstance(artifact, dict):
+            per_symbol.append(_compact_watchlist_artifact(symbol, artifact))
+        else:
+            per_symbol.append(entry)
 
     successful_decisions = [item for item in per_symbol if item.get("decision")]
     allocation = build_allocation_summary(config, decision_artifacts)
@@ -296,6 +316,7 @@ def _build_watchlist_decision_run(
         "mode": config.mode,
         "symbols": symbols,
         "per_symbol": per_symbol,
+        "open_revalidation": open_revalidation,
         "allocation": allocation,
         "selected_order_preview": selected_order_preview,
         "execution_attempt_id": execution_attempt_id,
@@ -310,6 +331,67 @@ def _build_watchlist_decision_run(
         (allocation["selected_open"] or {}).get("candidate_id"),
     )
     return combined_artifact, len(successful_decisions)
+
+
+def _revalidate_open_order_previews(
+    *,
+    config,
+    logger: logging.Logger,
+    alpaca: AlpacaClient,
+    decision_artifacts: list[dict[str, Any]],
+) -> dict[str, Any]:
+    summary = {
+        "enabled": bool(config.get("execution", "pre_submit_revalidate_quotes", default=True)),
+        "checked_count": 0,
+        "eligible_count": 0,
+        "blocked_count": 0,
+        "errors": [],
+    }
+    if summary["enabled"] is not True:
+        return summary
+
+    for artifact in decision_artifacts:
+        decision = artifact.get("decision")
+        order_preview = artifact.get("order_preview")
+        if not isinstance(decision, dict) or decision.get("action") != "open":
+            continue
+        if not artifact.get("accepted") or not isinstance(order_preview, dict):
+            continue
+
+        summary["checked_count"] += 1
+        try:
+            refreshed_preview = revalidate_put_credit_spread_entry_preview(
+                config=config,
+                alpaca=alpaca,
+                order_preview=order_preview,
+                adjustment_index=0,
+            )
+        except Exception as exc:  # noqa: BLE001 - mark candidate execution-ineligible and keep going
+            refreshed_preview = dict(order_preview)
+            refreshed_preview.setdefault("errors", []).append(f"Revalidation failed: {exc}")
+            refreshed_preview["revalidation"] = {
+                "kind": "put_credit_spread_entry_revalidation",
+                "ok": False,
+                "errors": [str(exc)],
+                "warnings": [],
+            }
+            summary["errors"].append(str(exc))
+
+        artifact["order_preview"] = refreshed_preview
+        revalidation = refreshed_preview.get("revalidation") if isinstance(refreshed_preview, dict) else None
+        if isinstance(revalidation, dict) and revalidation.get("ok") is True and not refreshed_preview.get("errors"):
+            summary["eligible_count"] += 1
+        else:
+            summary["blocked_count"] += 1
+
+    if summary["checked_count"]:
+        logger.info(
+            "Fresh quote revalidation complete: checked=%s eligible=%s blocked=%s",
+            summary["checked_count"],
+            summary["eligible_count"],
+            summary["blocked_count"],
+        )
+    return summary
 
 
 def _run_symbol_decisions(

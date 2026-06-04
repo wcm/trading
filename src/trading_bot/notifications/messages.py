@@ -162,6 +162,7 @@ def _send_watchlist_decision_summary(
         "Read-only watchlist decision complete\n"
         f"Symbols: {', '.join(artifact['symbols'])}\n"
         f"Accepted opens: {allocation['accepted_open_count']}\n"
+        f"Executable opens: {allocation.get('execution_eligible_open_count')}\n"
         f"Selected open: {selected_line}\n"
         f"Order preview: {_preview_status(selected_preview)}\n"
         f"Execution: {_execution_status(execution_attempt)}\n"
@@ -219,6 +220,7 @@ def _send_run_cycle_summary(
             [
                 f"Open symbols: {', '.join(watchlist.get('symbols', []))}",
                 f"Accepted opens: {allocation.get('accepted_open_count')}",
+                f"Executable opens: {allocation.get('execution_eligible_open_count')}",
                 f"Selected open: {selected_line}",
                 f"Order preview: {_preview_status(selected_preview)}",
                 f"Execution: {_execution_status(execution_attempt)}",
