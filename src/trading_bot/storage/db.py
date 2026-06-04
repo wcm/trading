@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
 
 def init_db(db_path: Path) -> None:
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(db_path) as conn:
+    with closing(sqlite3.connect(db_path)) as conn:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS bot_runs (
@@ -105,7 +106,7 @@ def record_bot_run(
     status: str,
     details: dict[str, Any],
 ) -> None:
-    with sqlite3.connect(db_path) as conn:
+    with closing(sqlite3.connect(db_path)) as conn:
         conn.execute(
             """
             INSERT INTO bot_runs (started_at, mode, status, details_json)
@@ -117,7 +118,7 @@ def record_bot_run(
 
 
 def record_option_scan(db_path: Path, *, mode: str, scan_result: Any) -> int:
-    with sqlite3.connect(db_path) as conn:
+    with closing(sqlite3.connect(db_path)) as conn:
         cursor = conn.execute(
             """
             INSERT INTO option_scan_runs (
@@ -177,7 +178,7 @@ def record_llm_decision(
     raw_response: dict[str, Any],
     validator_errors: list[str],
 ) -> int:
-    with sqlite3.connect(db_path) as conn:
+    with closing(sqlite3.connect(db_path)) as conn:
         cursor = conn.execute(
             """
             INSERT INTO llm_decisions (
@@ -220,7 +221,7 @@ def record_execution_attempt(
     attempt: Any,
 ) -> int:
     attempt_dict = attempt.to_dict() if hasattr(attempt, "to_dict") else dict(attempt)
-    with sqlite3.connect(db_path) as conn:
+    with closing(sqlite3.connect(db_path)) as conn:
         cursor = conn.execute(
             """
             INSERT INTO execution_attempts (

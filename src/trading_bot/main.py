@@ -15,7 +15,7 @@ from trading_bot.config import load_config, load_env_file, resolve_path
 from trading_bot.data.events import build_event_context
 from trading_bot.data.market_data import build_market_context
 from trading_bot.data.news import build_news_context
-from trading_bot.execution.gate import maybe_submit_paper_order
+from trading_bot.execution.gate import maybe_submit_paper_close_order, maybe_submit_paper_order
 from trading_bot.execution.orders import build_client_order_id, build_put_credit_spread_order_preview
 from trading_bot.llm.decision import build_decision_packet, candidate_dicts_by_id, packet_candidate_ids
 from trading_bot.llm.openai_client import OpenAIClient, OpenAIClientError
@@ -161,7 +161,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     monitor = subparsers.add_parser(
         "monitor-positions",
-        help="Run a read-only monitor for existing put credit spread positions.",
+        help="Run a monitor for existing put credit spread positions.",
     )
     monitor.add_argument(
         "--option-feed",
@@ -176,6 +176,11 @@ def build_parser() -> argparse.ArgumentParser:
     monitor.add_argument(
         "--json-output",
         help="Optional path to write the position monitor artifact JSON.",
+    )
+    monitor.add_argument(
+        "--submit-paper-close",
+        action="store_true",
+        help="Request paper close order submission for recommended closes. Requires execution.enable_paper_close_orders=true.",
     )
 
     cycle = subparsers.add_parser(
@@ -215,6 +220,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--submit-paper",
         action="store_true",
         help="Request paper order submission for an allocator-selected open. Requires execution.enable_paper_orders=true.",
+    )
+    cycle.add_argument(
+        "--submit-paper-close",
+        action="store_true",
+        help="Request paper close order submission for recommended closes. Requires execution.enable_paper_close_orders=true.",
     )
 
     scheduler = subparsers.add_parser(
@@ -269,6 +279,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--submit-paper",
         action="store_true",
         help="Request paper order submission for selected opens. Requires execution.enable_paper_orders=true.",
+    )
+    scheduler.add_argument(
+        "--submit-paper-close",
+        action="store_true",
+        help="Request paper close order submission for recommended closes. Requires execution.enable_paper_close_orders=true.",
     )
     scheduler.add_argument(
         "--once",
@@ -778,6 +793,16 @@ def _run_cycle_with_lock(
     _log_position_monitor_result(logger, monitor_result)
     monitor_artifact = monitor_result.to_dict()
     close_recommended_spreads = _close_recommended_spreads(monitor_artifact)
+    close_execution_attempts = _maybe_execute_recommended_closes(
+        config=config,
+        logger=logger,
+        db_path=db_path,
+        alpaca=alpaca,
+        kill_switch=kill_switch,
+        notifier=notifier,
+        monitor_artifact=monitor_artifact,
+        submit_requested=args.submit_paper_close,
+    )
     watchlist_artifact = None
     successful_count = 0
     skipped_open_reason = None
@@ -817,6 +842,7 @@ def _run_cycle_with_lock(
         phase=phase,
         monitor_artifact=monitor_artifact,
         close_recommended_spreads=close_recommended_spreads,
+        close_execution_attempts=close_execution_attempts,
         watchlist_artifact=watchlist_artifact,
         skipped_open_reason=skipped_open_reason,
     )
@@ -838,6 +864,7 @@ def _run_cycle_with_lock(
             "command": "run-cycle",
             "phase": phase,
             "close_recommended_count": len(close_recommended_spreads),
+            "close_execution_attempt_count": len(close_execution_attempts),
             "watchlist_successful_decision_count": successful_count,
             "discord_requested": args.send_discord,
             "discord_ok": discord_ok,
@@ -961,10 +988,10 @@ def _build_watchlist_decision_run(
 
 
 def run_position_monitor(args: argparse.Namespace) -> int:
-    config, logger, _db_path, kill_switch, notifier = bootstrap(args)
-    logger.info("Starting read-only position monitor")
+    config, logger, db_path, kill_switch, notifier = bootstrap(args)
+    logger.info("Starting position monitor")
     if kill_switch.is_active():
-        logger.info("Kill switch is active; continuing because monitor-positions is read-only")
+        logger.info("Kill switch is active; close execution remains blocked")
 
     try:
         alpaca = AlpacaClient.from_config(config)
@@ -985,6 +1012,17 @@ def run_position_monitor(args: argparse.Namespace) -> int:
     _log_position_monitor_result(logger, result)
 
     artifact = result.to_dict()
+    close_execution_attempts = _maybe_execute_recommended_closes(
+        config=config,
+        logger=logger,
+        db_path=db_path,
+        alpaca=alpaca,
+        kill_switch=kill_switch,
+        notifier=notifier,
+        monitor_artifact=artifact,
+        submit_requested=args.submit_paper_close,
+    )
+    artifact["close_execution_attempts"] = close_execution_attempts
     if args.json_output:
         _write_json_artifact(args.json_output, artifact, logger, "position monitor")
 
@@ -1034,12 +1072,77 @@ def _close_recommended_spreads(monitor_artifact: dict[str, Any]) -> list[dict[st
     ]
 
 
+def _maybe_execute_recommended_closes(
+    *,
+    config,
+    logger: logging.Logger,
+    db_path: Path,
+    alpaca: AlpacaClient,
+    kill_switch: KillSwitch,
+    notifier: DiscordNotifier,
+    monitor_artifact: dict[str, Any],
+    submit_requested: bool,
+) -> list[dict[str, Any]]:
+    close_spreads = _close_recommended_spreads(monitor_artifact)
+    if not close_spreads:
+        return []
+
+    state_refresh_error = None
+    try:
+        final_open_orders = alpaca.get_orders(status="open")
+        final_positions = alpaca.get_positions()
+    except Exception as exc:  # noqa: BLE001 - final execution guard must fail closed
+        logger.exception("Final close execution state refresh failed: %s", exc)
+        state_refresh_error = str(exc)
+        final_open_orders = []
+        final_positions = []
+
+    attempts: list[dict[str, Any]] = []
+    for spread in close_spreads:
+        attempt = maybe_submit_paper_close_order(
+            config=config,
+            alpaca=alpaca,
+            kill_switch=kill_switch,
+            notifier=notifier,
+            submit_requested=submit_requested,
+            spread=spread,
+            order_preview=spread.get("close_order_preview"),
+            open_orders=final_open_orders,
+            open_positions=final_positions,
+            state_refresh_error=state_refresh_error,
+        )
+        attempt_id = record_execution_attempt(
+            db_path,
+            created_at=datetime.now(UTC).isoformat(),
+            mode=config.mode,
+            decision_id=None,
+            attempt=attempt,
+        )
+        logger.info(
+            "Paper close execution gate spread=%s status=%s submitted=%s attempt_id=%s block_reasons=%s",
+            spread.get("spread_id"),
+            attempt.status,
+            attempt.submitted,
+            attempt_id,
+            "; ".join(attempt.block_reasons) if attempt.block_reasons else "-",
+        )
+        attempts.append(
+            {
+                "spread_id": spread.get("spread_id"),
+                "execution_attempt_id": attempt_id,
+                "execution_attempt": attempt.to_dict(),
+            }
+        )
+    return attempts
+
+
 def _build_run_cycle_artifact(
     *,
     config,
     phase: str,
     monitor_artifact: dict[str, Any],
     close_recommended_spreads: list[dict[str, Any]],
+    close_execution_attempts: list[dict[str, Any]],
     watchlist_artifact: dict[str, Any] | None,
     skipped_open_reason: str | None,
 ) -> dict[str, Any]:
@@ -1051,6 +1154,7 @@ def _build_run_cycle_artifact(
         "monitor": monitor_artifact,
         "close_recommended_count": len(close_recommended_spreads),
         "close_recommended_spreads": close_recommended_spreads,
+        "close_execution_attempts": close_execution_attempts,
         "skipped_open_decisions": bool(skipped_open_reason),
         "skip_open_reason": skipped_open_reason,
         "watchlist_decision": watchlist_artifact,
@@ -1127,6 +1231,7 @@ def _scheduler_cycle_args(args: argparse.Namespace, json_output: str | None) -> 
         json_output=json_output,
         mock_decision=args.mock_decision,
         submit_paper=args.submit_paper,
+        submit_paper_close=args.submit_paper_close,
     )
 
 
@@ -1552,6 +1657,7 @@ def _send_run_cycle_summary(
 
     if close_spreads:
         lines.append(f"Open decisions: skipped ({artifact.get('skip_open_reason')})")
+        lines.extend(_close_execution_status_lines(artifact.get("close_execution_attempts") or []))
         for spread in close_spreads[:5]:
             active_flags = [
                 flag for flag, active in (spread.get("exit_flags") or {}).items() if active
@@ -1592,6 +1698,20 @@ def _send_run_cycle_summary(
         return True
 
     return False
+
+
+def _close_execution_status_lines(close_execution_attempts: list[dict[str, Any]]) -> list[str]:
+    if not close_execution_attempts:
+        return ["Close execution: not attempted"]
+    lines = [f"Close execution attempts: {len(close_execution_attempts)}"]
+    for item in close_execution_attempts[:5]:
+        if not isinstance(item, dict):
+            continue
+        attempt = item.get("execution_attempt") if isinstance(item, dict) else None
+        lines.append(
+            f"- {item.get('spread_id')}: {_execution_status(attempt if isinstance(attempt, dict) else None)}"
+        )
+    return lines
 
 
 def _watchlist_decision_detail_messages(artifact: dict[str, Any], *, heading: str) -> list[str]:
@@ -1734,11 +1854,13 @@ def _send_position_monitor_summary(
         spread_lines = ["- No put credit spreads detected."]
 
     content = (
-        "Read-only position monitor complete\n"
+        "Position monitor complete\n"
         f"Option positions: {artifact.get('option_position_count')}\n"
         f"Spreads: {artifact.get('spread_count')}\n"
         f"Unpaired legs: {len(artifact.get('unpaired_legs', []))}\n"
         + "\n".join(spread_lines)
+        + "\n"
+        + "\n".join(_close_execution_status_lines(artifact.get("close_execution_attempts") or []))
     )
     result = notifier.send(content)
     if result.ok:

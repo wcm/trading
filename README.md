@@ -89,6 +89,17 @@ Monitor existing paper option positions and generate read-only close previews:
 uv run trading-bot monitor-positions --send-discord --json-output data/last_position_monitor.json
 ```
 
+Paper close submission has its own two locks and is disabled by default:
+
+```bash
+uv run trading-bot monitor-positions --submit-paper-close --send-discord
+```
+
+The command above still refuses to submit close orders unless
+`execution.enable_paper_close_orders: true` is set in `config/settings.yaml`.
+Blocked or submitted close attempts are logged to SQLite `execution_attempts`.
+`run-cycle` and `schedule-local` also accept `--submit-paper-close`.
+
 Run one full local bot cycle. This monitors existing positions first, skips new
 open decisions when any spread has a close recommendation, and otherwise runs
 the watchlist decision/allocation path:

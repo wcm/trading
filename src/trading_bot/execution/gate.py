@@ -88,6 +88,69 @@ def maybe_submit_paper_order(
     )
 
 
+def maybe_submit_paper_close_order(
+    *,
+    config: AppConfig,
+    alpaca: AlpacaClient,
+    kill_switch: KillSwitch,
+    notifier: DiscordNotifier,
+    submit_requested: bool,
+    spread: dict[str, Any] | None,
+    order_preview: dict[str, Any] | None,
+    open_orders: list[dict[str, Any]],
+    open_positions: list[dict[str, Any]],
+    state_refresh_error: str | None = None,
+) -> PaperExecutionAttempt:
+    block_reasons = _paper_close_execution_block_reasons(
+        config=config,
+        kill_switch=kill_switch,
+        notifier=notifier,
+        submit_requested=submit_requested,
+        spread=spread,
+        order_preview=order_preview,
+        open_orders=open_orders,
+        open_positions=open_positions,
+        state_refresh_error=state_refresh_error,
+    )
+    payload = order_preview.get("payload") if isinstance(order_preview, dict) else None
+    if block_reasons:
+        return PaperExecutionAttempt(
+            requested=submit_requested,
+            submitted=False,
+            status="blocked",
+            block_reasons=block_reasons,
+            order_preview=order_preview,
+            order_payload=payload if isinstance(payload, dict) else None,
+            broker_response=None,
+            broker_error=None,
+        )
+
+    try:
+        broker_response = alpaca.submit_order(payload)
+    except Exception as exc:  # noqa: BLE001 - preserve broker failure in attempt log
+        return PaperExecutionAttempt(
+            requested=submit_requested,
+            submitted=False,
+            status="broker_error",
+            block_reasons=[],
+            order_preview=order_preview,
+            order_payload=payload,
+            broker_response=None,
+            broker_error=str(exc),
+        )
+
+    return PaperExecutionAttempt(
+        requested=submit_requested,
+        submitted=True,
+        status="submitted",
+        block_reasons=[],
+        order_preview=order_preview,
+        order_payload=payload,
+        broker_response=broker_response,
+        broker_error=None,
+    )
+
+
 def _paper_execution_block_reasons(
     *,
     config: AppConfig,
@@ -157,6 +220,79 @@ def _paper_execution_block_reasons(
     return reasons
 
 
+def _paper_close_execution_block_reasons(
+    *,
+    config: AppConfig,
+    kill_switch: KillSwitch,
+    notifier: DiscordNotifier,
+    submit_requested: bool,
+    spread: dict[str, Any] | None,
+    order_preview: dict[str, Any] | None,
+    open_orders: list[dict[str, Any]],
+    open_positions: list[dict[str, Any]],
+    state_refresh_error: str | None,
+) -> list[str]:
+    reasons: list[str] = []
+    if state_refresh_error:
+        reasons.append(f"Final close execution state refresh failed: {state_refresh_error}")
+    if not submit_requested:
+        reasons.append("CLI did not request --submit-paper-close")
+    if config.mode != "paper":
+        reasons.append(f"Mode is not paper: {config.mode}")
+    if not bool(config.get("execution", "enable_paper_close_orders", default=False)):
+        reasons.append("execution.enable_paper_close_orders is false")
+    if kill_switch.is_active():
+        reasons.append(f"Kill switch is active at {kill_switch.path}")
+    if not notifier.is_configured:
+        reasons.append("Discord webhook is not configured")
+    if not isinstance(spread, dict):
+        reasons.append("No monitored spread is available")
+    elif spread.get("close_recommended") is not True:
+        reasons.append("Spread does not have close_recommended=true")
+
+    if not isinstance(order_preview, dict):
+        reasons.append("No close order preview is available")
+        return reasons
+
+    preview_errors = order_preview.get("errors") or []
+    if preview_errors:
+        reasons.append(f"Close order preview has errors: {'; '.join(str(error) for error in preview_errors)}")
+    if order_preview.get("kind") != "alpaca_mleg_close_preview":
+        reasons.append("Order preview is not an Alpaca MLeg close preview")
+    if order_preview.get("submit_disabled") is not True:
+        reasons.append("Close order preview must be generated with submit_disabled=true")
+
+    payload = order_preview.get("payload")
+    if not isinstance(payload, dict):
+        reasons.append("Close order preview payload is unavailable")
+        return reasons
+    if payload.get("order_class") != "mleg":
+        reasons.append("Close order payload order_class is not mleg")
+    if payload.get("type") != "limit":
+        reasons.append("Close order payload type is not limit")
+    if bool(config.get("execution", "no_market_orders", default=True)) and payload.get("type") == "market":
+        reasons.append("Market orders are disabled")
+
+    leg_symbols = _payload_leg_symbols(payload)
+    if len(leg_symbols) < 2:
+        reasons.append("Close order payload must include at least two leg symbols")
+    if _has_duplicate_leg_order(leg_symbols=leg_symbols, open_orders=open_orders):
+        reasons.append("Duplicate close order already exists for at least one spread leg")
+    missing_position_symbols = _missing_position_symbols(leg_symbols=leg_symbols, open_positions=open_positions)
+    if missing_position_symbols:
+        reasons.append(f"Spread legs are not all open positions: {', '.join(missing_position_symbols)}")
+
+    intents = {
+        str(leg.get("position_intent") or "")
+        for leg in payload.get("legs", [])
+        if isinstance(leg, dict)
+    }
+    if "buy_to_close" not in intents or "sell_to_close" not in intents:
+        reasons.append("Close order payload must include buy_to_close and sell_to_close legs")
+
+    return reasons
+
+
 def _has_duplicate_open_order(*, symbol: str, open_orders: list[dict[str, Any]]) -> bool:
     for order in open_orders:
         order_symbol = str(order.get("symbol") or "")
@@ -168,6 +304,41 @@ def _has_duplicate_open_order(*, symbol: str, open_orders: list[dict[str, Any]])
                 if isinstance(leg, dict) and str(leg.get("symbol") or "").startswith(symbol):
                     return True
     return False
+
+
+def _has_duplicate_leg_order(*, leg_symbols: set[str], open_orders: list[dict[str, Any]]) -> bool:
+    if not leg_symbols:
+        return False
+    for order in open_orders:
+        order_symbol = str(order.get("symbol") or "")
+        if order_symbol in leg_symbols:
+            return True
+        legs = order.get("legs")
+        if isinstance(legs, list):
+            for leg in legs:
+                if isinstance(leg, dict) and str(leg.get("symbol") or "") in leg_symbols:
+                    return True
+    return False
+
+
+def _payload_leg_symbols(payload: dict[str, Any]) -> set[str]:
+    legs = payload.get("legs")
+    if not isinstance(legs, list):
+        return set()
+    return {
+        str(leg.get("symbol"))
+        for leg in legs
+        if isinstance(leg, dict) and leg.get("symbol")
+    }
+
+
+def _missing_position_symbols(*, leg_symbols: set[str], open_positions: list[dict[str, Any]]) -> list[str]:
+    position_symbols = {
+        str(position.get("symbol"))
+        for position in open_positions
+        if isinstance(position, dict) and position.get("symbol")
+    }
+    return sorted(symbol for symbol in leg_symbols if symbol not in position_symbols)
 
 
 def _decimal_or_none(value: Any) -> Decimal | None:

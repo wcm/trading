@@ -102,6 +102,7 @@ class RunCycleTests(unittest.TestCase):
                 "--mock-decision",
                 "skip",
                 "--submit-paper",
+                "--submit-paper-close",
             ]
         )
 
@@ -110,6 +111,7 @@ class RunCycleTests(unittest.TestCase):
         self.assertEqual(args.max_candidates, 3)
         self.assertEqual(args.mock_decision, "skip")
         self.assertTrue(args.submit_paper)
+        self.assertTrue(args.submit_paper_close)
 
     def test_parser_accepts_schedule_local_args(self) -> None:
         args = build_parser().parse_args(
@@ -123,6 +125,7 @@ class RunCycleTests(unittest.TestCase):
                 "30",
                 "--send-discord",
                 "--send-cycle-discord",
+                "--submit-paper-close",
                 "--once",
                 "--ignore-market-hours",
                 "--mock-decision",
@@ -136,6 +139,7 @@ class RunCycleTests(unittest.TestCase):
         self.assertEqual(args.heartbeat_minutes, 30)
         self.assertTrue(args.send_discord)
         self.assertTrue(args.send_cycle_discord)
+        self.assertTrue(args.submit_paper_close)
         self.assertTrue(args.once)
         self.assertTrue(args.ignore_market_hours)
 
@@ -162,6 +166,7 @@ class RunCycleTests(unittest.TestCase):
         self.assertEqual(cycle_args.max_candidates, 2)
         self.assertFalse(cycle_args.send_discord)
         self.assertEqual(cycle_args.json_output, "data/test_cycle.json")
+        self.assertFalse(cycle_args.submit_paper_close)
 
     def test_scheduler_cycle_json_output_is_timestamped(self) -> None:
         args = build_parser().parse_args(
@@ -187,6 +192,7 @@ class RunCycleTests(unittest.TestCase):
             phase="monitor_close_alert",
             monitor_artifact=monitor,
             close_recommended_spreads=close_spreads,
+            close_execution_attempts=[],
             watchlist_artifact=None,
             skipped_open_reason="1 existing spread(s) have close_recommended=true",
         )
@@ -205,6 +211,7 @@ class RunCycleTests(unittest.TestCase):
             phase="monitor_close_alert",
             monitor_artifact=monitor,
             close_recommended_spreads=close_spreads,
+            close_execution_attempts=[],
             watchlist_artifact=None,
             skipped_open_reason="1 existing spread(s) have close_recommended=true",
         )
@@ -246,6 +253,7 @@ class RunCycleTests(unittest.TestCase):
                 "warnings": [],
             },
             close_recommended_spreads=[],
+            close_execution_attempts=[],
             watchlist_artifact=watchlist,
             skipped_open_reason=None,
         )

@@ -1073,17 +1073,17 @@ Ops:
 
 ## 13. Immediate Next Step
 
-Reduce repeated LLM cost by separating cheap position monitoring from expensive open-decision scans.
+Add order lifecycle polling and fill/reject notifications.
 
 Recommended next implementation order:
 
-1. Keep the local scheduler default at 3 minutes for full `run-cycle`.
-2. Add a cheaper monitor-only cadence that can run every minute while positions are open.
-3. Add a configurable "open-decision cadence" so LLM scans run less often than monitoring.
-4. Add cost logging per LLM decision from OpenAI usage fields.
-5. Add a daily estimated LLM spend summary to Discord.
+1. Record broker order ids from submitted open and close attempts.
+2. Add an order-status poller for open/recent Alpaca orders.
+3. Notify Discord on filled, partial fill, rejected, canceled, and expired statuses.
+4. Add a daily order lifecycle summary.
+5. Then run one tiny full paper lifecycle: open, monitor, close, verify P&L.
 
-The next milestone is not live trading. The next milestone is "the local bot can supervise positions frequently without paying for unnecessary LLM calls."
+The next milestone is not live trading. The next milestone is "the bot can observe every paper order after submission and report what happened."
 
 ## 14. Execution Progress
 
@@ -1160,6 +1160,11 @@ Completed:
 - Added configurable scheduler interval and heartbeat interval, defaulting to 3 minutes and 60 minutes.
 - Added timestamped scheduled run-cycle JSON artifacts via `--json-output-dir`.
 - Added configurable OpenAI `decision_engine.reasoning_effort`, defaulting to `medium`.
+- Added guarded paper close execution path for monitor and run-cycle close recommendations.
+- Added `execution.enable_paper_close_orders: false` as the default paper close execution lock.
+- Added `--submit-paper-close` to `monitor-positions`, `run-cycle`, and `schedule-local`.
+- Added final paper close execution gate checks for mode, config flag, kill switch, Discord config, close preview errors, MLeg limit payload, duplicate leg orders, and current spread-leg positions.
+- Added SQLite `execution_attempts` logging for blocked, broker-error, and submitted close attempts.
 - Added unit tests for config loading and put credit spread candidate construction.
 - Added unit tests for LLM decision packet construction and validator rejection paths.
 - Added unit test for stale market data blocking `market_trend_ok`.
@@ -1170,6 +1175,7 @@ Completed:
 - Added unit tests for option symbol parsing, position monitoring, P&L marking, profit-target flags, and close previews.
 - Added unit tests for run-cycle argument parsing, close-before-open gating, and Discord cycle summaries.
 - Added unit tests for local scheduler parsing/defaults/artifact paths and OpenAI reasoning effort payloads.
+- Added unit tests for the disabled-by-default paper close execution gate.
 - Updated paper-mode option data feed to `indicative` because Alpaca returned `OPRA agreement is not signed`.
 - Kept `opra` as the required live-mode target feed before real options execution.
 
@@ -1193,6 +1199,7 @@ Verified:
 - `uv run trading-bot decide-watchlist --symbols AAPL --max-candidates 1 --mock-decision skip --send-discord --json-output data/last_decision_watchlist_full_discord.json`
 - `uv run trading-bot decide-watchlist --symbols AAPL --max-candidates 1 --mock-decision skip --submit-paper --json-output data/last_submit_paper_blocked_mock.json`
 - `uv run trading-bot monitor-positions --send-discord --json-output data/last_position_monitor.json`
+- `uv run trading-bot monitor-positions --submit-paper-close --json-output data/last_position_monitor_close_gate.json`
 - `uv run trading-bot run-cycle --symbols AAPL,MSFT --max-candidates 1 --mock-decision skip --json-output data/last_run_cycle_mock.json`
 - `uv run trading-bot run-cycle --symbols AAPL,MSFT --max-candidates 1 --mock-decision skip --send-discord --json-output data/last_run_cycle_mock_discord.json`
 - `uv run trading-bot schedule-local --symbols AAPL --max-candidates 1 --mock-decision skip --send-discord --json-output-dir data/scheduler_cycles --once`
@@ -1220,6 +1227,7 @@ Current known state:
 - `run-cycle` works as the intended local loop: monitor first, close alerts before opens, then watchlist decisions if safe to look for new entries.
 - `schedule-local` works as the local scheduler: it checks Alpaca market hours, sends heartbeat/error notifications, and runs one locked `run-cycle` per interval.
 - GPT-5.5 reasoning effort is configurable and currently defaults to `medium`.
+- Paper close order submission code exists but is blocked by default unless both `--submit-paper-close` and `execution.enable_paper_close_orders: true` are present.
 - External earnings/calendar provider integration is still not implemented.
 - The latest real LLM decision accepted by the validator is an `open` recommendation for a read-only META put credit spread: `META-2026-06-12-597.50P-592.50P`, quantity 1, credit limit `-1.02`, max loss USD 398.
 - OPRA is not currently enabled because the OPRA agreement is not signed.
@@ -1234,6 +1242,6 @@ Recent commits:
 
 Latest milestone:
 
-- Add local market-hours scheduler for `run-cycle`
-- Default full-cycle cadence to 3 minutes for cost control
-- Add configurable GPT reasoning effort
+- Add guarded paper close execution
+- Record blocked/submitted close attempts
+- Keep close execution disabled by default
