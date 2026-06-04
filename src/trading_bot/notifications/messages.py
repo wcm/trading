@@ -446,6 +446,12 @@ def _execution_status(execution_attempt: dict[str, Any] | None) -> str:
     broker_error = execution_attempt.get("broker_error")
     if broker_error:
         return f"{status}, submitted={submitted}, broker_error={str(broker_error)[:120]}"
+    order_management = execution_attempt.get("order_management")
+    if isinstance(order_management, dict) and order_management.get("final_status"):
+        return (
+            f"{status}, submitted={submitted}, "
+            f"entry={order_management.get('final_status')}"
+        )
     return f"{status}, submitted={submitted}"
 
 

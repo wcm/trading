@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -20,6 +21,8 @@ class AlpacaClient:
     key_id: str
     secret_key: str
     timeout_seconds: float = 15.0
+    max_retries: int = 0
+    retry_backoff_seconds: float = 1.0
 
     @classmethod
     def from_config(cls, config: AppConfig) -> "AlpacaClient":
@@ -41,7 +44,18 @@ class AlpacaClient:
         data_base_url = str(
             config.get("alpaca", "data_base_url", default="https://data.alpaca.markets")
         ).rstrip("/")
-        return cls(base_url=base_url, data_base_url=data_base_url, key_id=key_id, secret_key=secret_key)
+        timeout_seconds = float(config.get("alpaca", "request_timeout_seconds", default=15.0))
+        max_retries = int(config.get("alpaca", "request_retries", default=0))
+        retry_backoff_seconds = float(config.get("alpaca", "request_retry_backoff_seconds", default=1.0))
+        return cls(
+            base_url=base_url,
+            data_base_url=data_base_url,
+            key_id=key_id,
+            secret_key=secret_key,
+            timeout_seconds=timeout_seconds,
+            max_retries=max(0, max_retries),
+            retry_backoff_seconds=max(0.0, retry_backoff_seconds),
+        )
 
     def get_account(self) -> dict[str, Any]:
         return self._get("/v2/account")
@@ -61,11 +75,21 @@ class AlpacaClient:
             raise BrokerError("Expected Alpaca orders response to be a list")
         return data
 
+    def get_order(self, order_id: str) -> dict[str, Any]:
+        data = self._get(f"/v2/orders/{order_id}")
+        if not isinstance(data, dict):
+            raise BrokerError("Expected Alpaca order response to be an object")
+        return data
+
     def submit_order(self, payload: dict[str, Any]) -> dict[str, Any]:
         data = self._post("/v2/orders", json_payload=payload)
         if not isinstance(data, dict):
             raise BrokerError("Expected Alpaca order submission response to be an object")
         return data
+
+    def cancel_order(self, order_id: str) -> dict[str, Any]:
+        data = self._delete(f"/v2/orders/{order_id}")
+        return data if isinstance(data, dict) else {}
 
     def get_latest_stock_bars(self, symbols: list[str], *, feed: str = "iex") -> dict[str, Any]:
         data = self._get_data(
@@ -203,12 +227,16 @@ class AlpacaClient:
     def _post(self, path: str, json_payload: dict[str, Any]) -> Any:
         return self._request("POST", f"{self.base_url}{path}", json_payload=json_payload)
 
+    def _delete(self, path: str) -> Any:
+        return self._request("DELETE", f"{self.base_url}{path}", allow_empty=True)
+
     def _request(
         self,
         method: str,
         url: str,
         params: dict[str, str] | None = None,
         json_payload: dict[str, Any] | None = None,
+        allow_empty: bool = False,
     ) -> Any:
         headers = {
             "APCA-API-KEY-ID": self.key_id,
@@ -217,20 +245,49 @@ class AlpacaClient:
         }
         if json_payload is not None:
             headers["Content-Type"] = "application/json"
-        try:
-            response = httpx.request(
-                method,
-                url,
-                headers=headers,
-                params=params,
-                json=json_payload,
-                timeout=self.timeout_seconds,
-            )
-            response.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            raise BrokerError(
-                f"Alpaca request failed: {exc.response.status_code} {exc.response.text}"
-            ) from exc
-        except httpx.HTTPError as exc:
-            raise BrokerError(f"Alpaca request failed: {exc}") from exc
-        return response.json()
+        attempt = 0
+        while True:
+            try:
+                response = httpx.request(
+                    method,
+                    url,
+                    headers=headers,
+                    params=params,
+                    json=json_payload,
+                    timeout=self.timeout_seconds,
+                )
+                response.raise_for_status()
+                if allow_empty and not response.content:
+                    return {}
+                return response.json()
+            except httpx.HTTPStatusError as exc:
+                if self._should_retry_status(exc.response.status_code, attempt):
+                    self._sleep_before_retry(attempt)
+                    attempt += 1
+                    continue
+                raise BrokerError(
+                    f"Alpaca request failed: {exc.response.status_code} {exc.response.text}"
+                ) from exc
+            except httpx.TimeoutException as exc:
+                if self._should_retry_transport(attempt):
+                    self._sleep_before_retry(attempt)
+                    attempt += 1
+                    continue
+                raise BrokerError(f"Alpaca request failed: {exc}") from exc
+            except httpx.TransportError as exc:
+                if self._should_retry_transport(attempt):
+                    self._sleep_before_retry(attempt)
+                    attempt += 1
+                    continue
+                raise BrokerError(f"Alpaca request failed: {exc}") from exc
+
+    def _should_retry_status(self, status_code: int, attempt: int) -> bool:
+        return status_code in {429, 500, 502, 503, 504} and attempt < self.max_retries
+
+    def _should_retry_transport(self, attempt: int) -> bool:
+        return attempt < self.max_retries
+
+    def _sleep_before_retry(self, attempt: int) -> None:
+        delay = self.retry_backoff_seconds * (2**attempt)
+        if delay > 0:
+            time.sleep(delay)

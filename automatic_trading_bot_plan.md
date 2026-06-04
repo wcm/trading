@@ -938,6 +938,9 @@ alpaca:
   use_mleg_orders: true
   credit_limit_price_must_be_negative: true
   require_client_order_id: true
+  request_timeout_seconds: 30
+  request_retries: 2
+  request_retry_backoff_seconds: 1
 
 account:
   paper_starting_capital: 10000
@@ -995,6 +998,7 @@ market_filters:
 decision_engine:
   type: llm
   prompt_version: put_credit_spread_v1
+  max_concurrent_symbols: 8
   temperature: 0
   allowed_actions:
     - open
@@ -1010,8 +1014,13 @@ decision_engine:
 
 execution:
   order_type: limit
+  pre_submit_revalidate_quotes: true
+  entry_limit_credit_buffer: 0.05
+  entry_price_adjustment_step: 0.05
+  entry_order_poll_seconds: 5
   entry_order_timeout_seconds: 60
   max_entry_price_adjustments: 3
+  manage_entry_orders: true
   no_market_orders: true
 
 notifications:
@@ -1073,31 +1082,35 @@ Ops:
 
 ## 13. Immediate Next Step
 
-Next milestone: first supervised real paper order.
+Next milestone: first filled supervised paper order and full paper lifecycle review.
 
 Build this next:
 
-- Review the latest scheduler split and daily summary output.
 - Enable paper open execution deliberately for one supervised trade.
+- Use the new pre-submit quote revalidation and entry cancel/replace management.
 - Keep quantity at 1 spread and keep paper execution locks easy to turn off.
 - Watch Discord order lifecycle, position monitor, daily summary, and SQLite logs.
 - Close the spread through the guarded paper close path and review P&L.
 
-The next milestone is not live trading. The next milestone is "one complete paper trade lifecycle is opened, monitored, closed, and understood."
+The next milestone is not live trading. The next milestone is "one complete paper trade lifecycle is filled, monitored, closed, and understood."
 
 ## 14. Execution Progress
 
-Last updated: 2026-06-04
+Last updated: 2026-06-05
 
 Current state:
 
 - Repo is initialized and pushed to `https://github.com/wcm/trading.git`.
-- Mode remains paper trading; no paper or live orders have been submitted by the bot.
+- Mode remains paper trading; no live orders have been submitted.
+- One supervised Alpaca paper order was submitted for a META put credit spread and canceled unfilled; no paper positions are currently open.
 - Alpaca paper connectivity works for account, clock, positions, orders, stock bars, option contracts, option snapshots, and news.
 - Discord notifications work and are required before execution gates can submit orders.
 - SQLite logging is active for bot runs, option scans, LLM decisions, execution attempts, and order status events.
 - The bot can scan put credit spreads, build LLM decision packets, validate decisions, generate MLeg previews, monitor positions, run one local cycle, and run a market-hours scheduler.
+- Watchlist decisions can run concurrently up to `decision_engine.max_concurrent_symbols`, currently 8.
+- Alpaca API requests use a 30-second timeout plus two retries for transport failures, rate limits, and 5xx responses.
 - Paper open and close execution paths exist but are disabled by default behind config and CLI locks.
+- Paper entry execution now refreshes selected spread quotes immediately before submit, recalculates bounded limit pricing, polls stale entries, cancels unfilled orders, and can submit limited replacements within configured credit bounds.
 - The scheduler now uses a split cadence: 1-minute checks, monitor-only supervision when positions exist, 5-minute new-open decision cycles, order lifecycle polling each check, and one after-market daily summary.
 - Daily summaries focus on account equity, daily P&L, buying power, open positions, estimated open spread P&L, order lifecycle events, and execution attempts.
 - `main.py` has been refactored into a thin CLI dispatcher with separate modules for parser, bootstrap, commands, run cycles, scheduler, summaries, notifications, order lifecycle, and shared utilities.
@@ -1107,25 +1120,25 @@ Current state:
 Completed milestone groups:
 
 - Project foundation: Python/uv scaffold, config, ignored secrets, logging, kill switch, Discord, SQLite.
-- Alpaca integration: paper broker client for account, market data, options data, news, positions, orders, and MLeg submission payloads.
+- Alpaca integration: paper broker client for account, market data, options data, news, positions, orders, single-order lookup/cancel, transient request retries, and MLeg submission payloads.
 - Strategy and data: put credit spread scanner, conservative credit/max-loss math, liquidity checks, trend checks, quote freshness, event/earnings context, and news context.
 - LLM decisioning: OpenAI Responses API, strict JSON schema, prompt versioning, per-symbol watchlist decisions, mock mode, decision persistence, and validator guard rails.
-- Risk and execution gates: max-loss/open-risk checks, symbol/candidate checks, stale-data blocks, default-disabled paper open/close order submission, and execution-attempt logging.
+- Risk and execution gates: max-loss/open-risk checks, symbol/candidate checks, stale-data blocks, pre-submit quote revalidation, default-disabled paper open/close order submission, entry cancel/replace management, and execution-attempt logging.
 - Monitoring loop: position reconstruction, close previews, P&L estimates, hard exit flags, monitor-before-open `run-cycle`, non-overlap lock, split-cadence local scheduler, and daily trading summary.
 - Notifications: Discord summaries for scans, decisions, run cycles, execution attempts, scheduler heartbeat/errors, order lifecycle changes, and daily P&L/open-position summaries.
-- Tests: unit coverage for scanning, LLM packets, validation, liquidity/events/news blocks, allocation, order previews, execution gates, position monitoring, run-cycle/scheduler behavior, daily summaries, and order lifecycle polling.
+- Tests: unit coverage for scanning, LLM packets, validation, liquidity/events/news blocks, allocation, order previews, execution gates, entry quote revalidation/cancel-replace, position monitoring, run-cycle/scheduler behavior, daily summaries, and order lifecycle polling.
 
 Latest verification:
 
-- `uv run python -m unittest discover -s tests` passed with 50 tests.
+- `uv run python -m unittest discover -s tests` passed with 54 tests.
 - `uv run python -m compileall src tests` passed.
-- `git diff --check` passed.
-- Live paper checks confirmed Alpaca connectivity, zero open positions, zero recent orders, daily-summary JSON generation, scheduler one-shot mock validation, smoke CLI validation, and Discord notification delivery.
+- Parallel mock `run-cycle` with real Alpaca data completed successfully for all 8 watchlist symbols without OpenAI calls or order submission.
+- Live paper checks confirmed Alpaca connectivity, zero open positions, paper order lifecycle submit/new/cancel handling, daily-summary JSON generation, scheduler one-shot mock validation, smoke CLI validation, and Discord notification delivery.
 
 Known gaps:
 
 - External earnings/calendar provider integration is still not implemented.
-- No full paper trade lifecycle has been opened, monitored, closed, and reviewed yet.
+- No filled paper trade lifecycle has been opened, monitored, closed, and reviewed yet.
 - Cloud deployment is not started.
 - Live trading remains out of scope until paper promotion criteria, Level 3 options approval, and OPRA/live data readiness are satisfied.
 

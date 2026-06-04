@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TextIO
@@ -32,6 +34,9 @@ from trading_bot.strategy.put_credit_spread import scan_put_credit_spreads
 from trading_bot.config import resolve_path
 from trading_bot.utils.artifacts import write_json_artifact
 from trading_bot.utils.symbols import watchlist_symbols_from_args_or_config
+
+
+_DB_WRITE_LOCK = threading.Lock()
 
 
 def run_cycle(args: argparse.Namespace) -> int:
@@ -206,29 +211,30 @@ def _build_watchlist_decision_run(
 ) -> tuple[dict[str, Any], int]:
     per_symbol: list[dict[str, Any]] = []
     decision_artifacts: list[dict[str, Any]] = []
+    symbol_results = _run_symbol_decisions(
+        config=config,
+        logger=logger,
+        db_path=db_path,
+        alpaca=alpaca,
+        symbols=symbols,
+        max_candidates=max_candidates,
+        option_feed=option_feed,
+        mock_decision=mock_decision,
+    )
+
     for symbol in symbols:
-        logger.info("Running independent decision for %s", symbol)
-        try:
-            artifact, scan_result = _build_decision_artifact(
-                config=config,
-                db_path=db_path,
-                alpaca=alpaca,
-                symbols=[symbol],
-                max_candidates=max_candidates,
-                option_feed=option_feed,
-                mock_decision=mock_decision,
-            )
-        except OpenAIClientError as exc:
-            logger.error("Decision failed for %s: %s", symbol, exc)
-            per_symbol.append({"symbol": symbol, "error": str(exc), "accepted": False})
+        result = symbol_results.get(symbol)
+        if result is None:
+            per_symbol.append({"symbol": symbol, "error": "Decision result missing", "accepted": False})
             continue
-        except Exception as exc:  # noqa: BLE001 - preserve per-symbol progress
-            logger.exception("Decision failed for %s: %s", symbol, exc)
-            per_symbol.append({"symbol": symbol, "error": str(exc), "accepted": False})
+        error = result.get("error")
+        if error:
+            per_symbol.append({"symbol": symbol, "error": error, "accepted": False})
             continue
 
+        artifact = result["artifact"]
+        scan_result = result["scan_result"]
         decision = artifact["decision"]
-        validator_errors = artifact["validator_errors"]
         logger.info(
             "Symbol %s decision action=%s accepted=%s candidate_id=%s confidence=%s candidates=%s",
             symbol,
@@ -268,6 +274,8 @@ def _build_watchlist_decision_run(
             allocation=allocation,
             state_refresh_error=state_refresh_error,
         )
+        if isinstance(execution_attempt.order_preview, dict):
+            selected_order_preview = execution_attempt.order_preview
         selected_decision_id = (allocation.get("selected_open") or {}).get("decision_id")
         execution_attempt_id = record_execution_attempt(
             db_path,
@@ -302,6 +310,94 @@ def _build_watchlist_decision_run(
         (allocation["selected_open"] or {}).get("candidate_id"),
     )
     return combined_artifact, len(successful_decisions)
+
+
+def _run_symbol_decisions(
+    *,
+    config,
+    logger: logging.Logger,
+    db_path: Path,
+    alpaca: AlpacaClient,
+    symbols: list[str],
+    max_candidates: int,
+    option_feed: str | None,
+    mock_decision: str | None,
+) -> dict[str, dict[str, Any]]:
+    max_workers = _max_concurrent_symbols(config, len(symbols))
+    logger.info("Running independent decisions for %s symbols with concurrency=%s", len(symbols), max_workers)
+    if max_workers <= 1 or len(symbols) <= 1:
+        return {
+            symbol: _run_single_symbol_decision(
+                config=config,
+                logger=logger,
+                db_path=db_path,
+                alpaca=alpaca,
+                symbol=symbol,
+                max_candidates=max_candidates,
+                option_feed=option_feed,
+                mock_decision=mock_decision,
+            )
+            for symbol in symbols
+        }
+
+    results: dict[str, dict[str, Any]] = {}
+    with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="symbol-decision") as executor:
+        futures = {
+            executor.submit(
+                _run_single_symbol_decision,
+                config=config,
+                logger=logger,
+                db_path=db_path,
+                alpaca=alpaca,
+                symbol=symbol,
+                max_candidates=max_candidates,
+                option_feed=option_feed,
+                mock_decision=mock_decision,
+            ): symbol
+            for symbol in symbols
+        }
+        for future in as_completed(futures):
+            symbol = futures[future]
+            results[symbol] = future.result()
+    return results
+
+
+def _run_single_symbol_decision(
+    *,
+    config,
+    logger: logging.Logger,
+    db_path: Path,
+    alpaca: AlpacaClient,
+    symbol: str,
+    max_candidates: int,
+    option_feed: str | None,
+    mock_decision: str | None,
+) -> dict[str, Any]:
+    logger.info("Running independent decision for %s", symbol)
+    try:
+        artifact, scan_result = _build_decision_artifact(
+            config=config,
+            db_path=db_path,
+            alpaca=alpaca,
+            symbols=[symbol],
+            max_candidates=max_candidates,
+            option_feed=option_feed,
+            mock_decision=mock_decision,
+        )
+        return {"artifact": artifact, "scan_result": scan_result}
+    except OpenAIClientError as exc:
+        logger.error("Decision failed for %s: %s", symbol, exc)
+        return {"error": str(exc)}
+    except Exception as exc:  # noqa: BLE001 - preserve per-symbol progress
+        logger.exception("Decision failed for %s: %s", symbol, exc)
+        return {"error": str(exc)}
+
+
+def _max_concurrent_symbols(config, symbol_count: int) -> int:
+    configured = int(config.get("decision_engine", "max_concurrent_symbols", default=1))
+    if configured < 1:
+        configured = 1
+    return min(configured, max(1, symbol_count))
 
 
 def _log_position_monitor_result(logger: logging.Logger, result) -> None:
@@ -501,7 +597,8 @@ def _build_decision_artifact(
         option_feed=option_feed,
     )
 
-    record_option_scan(db_path, mode=config.mode, scan_result=scan_result)
+    with _DB_WRITE_LOCK:
+        record_option_scan(db_path, mode=config.mode, scan_result=scan_result)
     packet = build_decision_packet(
         config=config,
         account=account,
@@ -529,18 +626,19 @@ def _build_decision_artifact(
         )
         * 60,
     )
-    decision_id = record_llm_decision(
-        db_path,
-        created_at=datetime.now(UTC).isoformat(),
-        mode=config.mode,
-        provider="mock" if mock_decision else "openai",
-        model=model,
-        prompt_version=str(config.get("decision_engine", "prompt_version", default="put_credit_spread_v1")),
-        packet=packet_dict,
-        response=decision,
-        raw_response=raw_response,
-        validator_errors=validator_errors,
-    )
+    with _DB_WRITE_LOCK:
+        decision_id = record_llm_decision(
+            db_path,
+            created_at=datetime.now(UTC).isoformat(),
+            mode=config.mode,
+            provider="mock" if mock_decision else "openai",
+            model=model,
+            prompt_version=str(config.get("decision_engine", "prompt_version", default="put_credit_spread_v1")),
+            packet=packet_dict,
+            response=decision,
+            raw_response=raw_response,
+            validator_errors=validator_errors,
+        )
     order_preview = None
     if not validator_errors and decision.get("action") == "open":
         selected_candidate = _selected_candidate_from_packet(packet_dict, decision.get("candidate_id"))

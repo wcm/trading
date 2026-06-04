@@ -14,6 +14,9 @@ alpaca:
   use_mleg_orders: true
   credit_limit_price_must_be_negative: true
   require_client_order_id: true
+  request_timeout_seconds: 30
+  request_retries: 2
+  request_retry_backoff_seconds: 1
 
 account:
   paper_starting_capital: 10000
@@ -92,6 +95,7 @@ decision_engine:
   provider: openai
   model: gpt-5.5
   reasoning_effort: medium
+  max_concurrent_symbols: 8
   openai_base_url: https://api.openai.com/v1
   prompt_version: put_credit_spread_v1
   temperature: 0
@@ -111,8 +115,13 @@ execution:
   enable_paper_orders: false
   enable_paper_close_orders: false
   order_type: limit
+  pre_submit_revalidate_quotes: true
+  entry_limit_credit_buffer: 0.05
+  entry_price_adjustment_step: 0.05
+  entry_order_poll_seconds: 5
   entry_order_timeout_seconds: 60
   max_entry_price_adjustments: 3
+  manage_entry_orders: true
   no_market_orders: true
 
 notifications:

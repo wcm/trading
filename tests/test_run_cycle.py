@@ -9,6 +9,7 @@ from trading_bot.cli.parser import build_parser
 from trading_bot.cycles.run_cycle import (
     _build_run_cycle_artifact,
     _close_recommended_spreads,
+    _max_concurrent_symbols,
 )
 from trading_bot.notifications.messages import (
     _send_daily_trading_summary,
@@ -236,6 +237,12 @@ class RunCycleTests(unittest.TestCase):
         self.assertFalse(cycle_args.send_discord)
         self.assertEqual(cycle_args.json_output, "data/test_cycle.json")
         self.assertFalse(cycle_args.submit_paper_close)
+
+    def test_watchlist_decision_concurrency_default_is_eight(self) -> None:
+        config = load_config("config/settings.yaml")
+
+        self.assertEqual(_max_concurrent_symbols(config, 8), 8)
+        self.assertEqual(_max_concurrent_symbols(config, 3), 3)
 
     def test_scheduler_cycle_json_output_is_timestamped(self) -> None:
         args = build_parser().parse_args(

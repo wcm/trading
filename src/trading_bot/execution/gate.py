@@ -6,6 +6,8 @@ from typing import Any
 
 from trading_bot.brokers.alpaca import AlpacaClient
 from trading_bot.config import AppConfig
+from trading_bot.execution.entry_orders import manage_entry_order_after_submission
+from trading_bot.execution.revalidation import revalidate_put_credit_spread_entry_preview
 from trading_bot.notifications.discord import DiscordNotifier
 from trading_bot.risk.kill_switch import KillSwitch
 
@@ -20,6 +22,7 @@ class PaperExecutionAttempt:
     order_payload: dict[str, Any] | None
     broker_response: dict[str, Any] | None
     broker_error: str | None
+    order_management: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -38,6 +41,12 @@ def maybe_submit_paper_order(
     allocation: dict[str, Any],
     state_refresh_error: str | None = None,
 ) -> PaperExecutionAttempt:
+    order_preview = _maybe_revalidate_entry_order_preview(
+        config=config,
+        alpaca=alpaca,
+        submit_requested=submit_requested,
+        order_preview=order_preview,
+    )
     block_reasons = _paper_execution_block_reasons(
         config=config,
         kill_switch=kill_switch,
@@ -60,6 +69,7 @@ def maybe_submit_paper_order(
             order_payload=payload if isinstance(payload, dict) else None,
             broker_response=None,
             broker_error=None,
+            order_management=None,
         )
 
     try:
@@ -74,17 +84,32 @@ def maybe_submit_paper_order(
             order_payload=payload,
             broker_response=None,
             broker_error=str(exc),
+            order_management=None,
         )
+
+    order_management = None
+    status = "submitted"
+    if isinstance(order_preview, dict) and isinstance(broker_response, dict):
+        order_management = manage_entry_order_after_submission(
+            config=config,
+            alpaca=alpaca,
+            order_preview=order_preview,
+            initial_order=broker_response,
+        )
+        final_management_status = order_management.get("final_status") if isinstance(order_management, dict) else None
+        if final_management_status and final_management_status not in {"disabled", "unsupported"}:
+            status = str(final_management_status)
 
     return PaperExecutionAttempt(
         requested=submit_requested,
         submitted=True,
-        status="submitted",
+        status=status,
         block_reasons=[],
         order_preview=order_preview,
         order_payload=payload,
         broker_response=broker_response,
         broker_error=None,
+        order_management=order_management,
     )
 
 
@@ -123,6 +148,7 @@ def maybe_submit_paper_close_order(
             order_payload=payload if isinstance(payload, dict) else None,
             broker_response=None,
             broker_error=None,
+            order_management=None,
         )
 
     try:
@@ -137,6 +163,7 @@ def maybe_submit_paper_close_order(
             order_payload=payload,
             broker_response=None,
             broker_error=str(exc),
+            order_management=None,
         )
 
     return PaperExecutionAttempt(
@@ -148,7 +175,42 @@ def maybe_submit_paper_close_order(
         order_payload=payload,
         broker_response=broker_response,
         broker_error=None,
+        order_management=None,
     )
+
+
+def _maybe_revalidate_entry_order_preview(
+    *,
+    config: AppConfig,
+    alpaca: AlpacaClient,
+    submit_requested: bool,
+    order_preview: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not submit_requested:
+        return order_preview
+    if not bool(config.get("execution", "pre_submit_revalidate_quotes", default=True)):
+        return order_preview
+    if not isinstance(order_preview, dict):
+        return order_preview
+    if not callable(getattr(alpaca, "get_option_snapshots", None)):
+        return order_preview
+    try:
+        return revalidate_put_credit_spread_entry_preview(
+            config=config,
+            alpaca=alpaca,
+            order_preview=order_preview,
+            adjustment_index=0,
+        )
+    except Exception as exc:  # noqa: BLE001 - execution gate must fail closed
+        updated = dict(order_preview)
+        updated.setdefault("errors", []).append(f"Revalidation failed: {exc}")
+        updated["revalidation"] = {
+            "kind": "put_credit_spread_entry_revalidation",
+            "ok": False,
+            "errors": [str(exc)],
+            "warnings": [],
+        }
+        return updated
 
 
 def _paper_execution_block_reasons(

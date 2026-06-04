@@ -23,6 +23,7 @@ unless both the CLI flag and config lock are enabled.
 - `trading_bot/app.py`: config, logging, SQLite, kill switch, and notifier bootstrap.
 - `trading_bot/commands/`: command wrappers for smoke, scans, decisions, and position monitoring.
 - `trading_bot/cycles/`: monitor-before-open run-cycle and watchlist decision orchestration.
+- `trading_bot/execution/`: Alpaca MLeg previews, execution gates, pre-submit revalidation, and entry order management.
 - `trading_bot/scheduler/`: local split-cadence scheduler.
 - `trading_bot/summaries/`: daily trading summary construction.
 - `trading_bot/notifications/messages.py`: Discord message formatting and chunking.
@@ -84,7 +85,10 @@ uv run trading-bot decide-watchlist --max-candidates 20 --send-discord --json-ou
 ```
 
 Discord sends one compact watchlist summary plus one full-detail message for
-each symbol decision.
+each symbol decision. Watchlist decisions are parallelized up to
+`decision_engine.max_concurrent_symbols`; the default is 8. Alpaca requests use
+configured timeouts/retries so transient data-call timeouts do not immediately
+drop a symbol from the cycle.
 
 Accepted `open` decisions include a read-only Alpaca MLeg order preview in the JSON artifact. The preview contains the `/v2/orders` payload.
 
@@ -95,6 +99,12 @@ uv run trading-bot decide-watchlist --max-candidates 20 --submit-paper --send-di
 ```
 
 The command above still refuses to submit unless `execution.enable_paper_orders: true` is set in `config/settings.yaml`.
+When paper submission is enabled, the bot refreshes the selected spread quotes
+immediately before submitting, recalculates the credit and max loss, and keeps
+the order as a bounded limit order. Stale unfilled entries are polled, canceled,
+and optionally replaced with a slightly more aggressive credit until
+`execution.max_entry_price_adjustments` is reached. Market orders remain
+disabled.
 
 Monitor existing paper option positions and generate read-only close previews:
 

@@ -98,6 +98,8 @@ def build_put_credit_spread_order_preview(
         "strategy": "put_credit_spread",
         "candidate_id": candidate.get("candidate_id"),
         "symbol": decision.get("symbol") or candidate.get("underlying_symbol"),
+        "candidate": dict(candidate),
+        "decision_limit_price": decision.get("limit_price"),
         "payload": payload,
         "estimated_entry_credit": _fmt_decimal(estimated_credit),
         "estimated_max_profit": _fmt_decimal(estimated_max_profit),
