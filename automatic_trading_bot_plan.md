@@ -1100,6 +1100,7 @@ Current state:
 - Paper open and close execution paths exist but are disabled by default behind config and CLI locks.
 - The scheduler now uses a split cadence: 1-minute checks, monitor-only supervision when positions exist, 5-minute new-open decision cycles, order lifecycle polling each check, and one after-market daily summary.
 - Daily summaries focus on account equity, daily P&L, buying power, open positions, estimated open spread P&L, order lifecycle events, and execution attempts.
+- `main.py` has been refactored into a thin CLI dispatcher with separate modules for parser, bootstrap, commands, run cycles, scheduler, summaries, notifications, order lifecycle, and shared utilities.
 - Order lifecycle polling works and currently reports zero recent Alpaca paper orders.
 - Paper option data uses Alpaca `indicative` because OPRA is not signed; live options trading should require OPRA.
 
@@ -1112,14 +1113,14 @@ Completed milestone groups:
 - Risk and execution gates: max-loss/open-risk checks, symbol/candidate checks, stale-data blocks, default-disabled paper open/close order submission, and execution-attempt logging.
 - Monitoring loop: position reconstruction, close previews, P&L estimates, hard exit flags, monitor-before-open `run-cycle`, non-overlap lock, split-cadence local scheduler, and daily trading summary.
 - Notifications: Discord summaries for scans, decisions, run cycles, execution attempts, scheduler heartbeat/errors, order lifecycle changes, and daily P&L/open-position summaries.
-- Tests: unit coverage for scanning, LLM packets, validation, liquidity/events/news blocks, allocation, order previews, execution gates, position monitoring, run-cycle/scheduler behavior, and order lifecycle polling.
+- Tests: unit coverage for scanning, LLM packets, validation, liquidity/events/news blocks, allocation, order previews, execution gates, position monitoring, run-cycle/scheduler behavior, daily summaries, and order lifecycle polling.
 
 Latest verification:
 
-- `uv run python -m unittest discover -s tests` passed with 49 tests.
+- `uv run python -m unittest discover -s tests` passed with 50 tests.
 - `uv run python -m compileall src tests` passed.
 - `git diff --check` passed.
-- Live paper checks confirmed Alpaca connectivity, zero open positions, zero recent orders, daily-summary JSON generation, scheduler one-shot mock validation, and Discord notification delivery.
+- Live paper checks confirmed Alpaca connectivity, zero open positions, zero recent orders, daily-summary JSON generation, scheduler one-shot mock validation, smoke CLI validation, and Discord notification delivery.
 
 Known gaps:
 
@@ -1137,6 +1138,6 @@ Recent implementation commits:
 
 Latest milestone:
 
-- Added split scheduler cadence: 1-minute supervision and 5-minute open-decision cycles.
-- Added trading-focused daily summary.
+- Refactored the monolithic `main.py` into smaller modules.
+- Kept CLI behavior and compatibility re-exports intact.
 - Kept all paper order execution disabled unless config and CLI locks are deliberately enabled.

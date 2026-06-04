@@ -16,6 +16,19 @@ The current milestone is one local paper-mode bot cycle:
 Paper order submission exists for allocator-selected opens, but it is disabled
 unless both the CLI flag and config lock are enabled.
 
+## Code Organization
+
+- `trading_bot/main.py`: thin CLI dispatcher and temporary compatibility re-exports.
+- `trading_bot/cli/parser.py`: command-line parser.
+- `trading_bot/app.py`: config, logging, SQLite, kill switch, and notifier bootstrap.
+- `trading_bot/commands/`: command wrappers for smoke, scans, decisions, and position monitoring.
+- `trading_bot/cycles/`: monitor-before-open run-cycle and watchlist decision orchestration.
+- `trading_bot/scheduler/`: local split-cadence scheduler.
+- `trading_bot/summaries/`: daily trading summary construction.
+- `trading_bot/notifications/messages.py`: Discord message formatting and chunking.
+- `trading_bot/orders/lifecycle.py`: order status polling and lifecycle change recording.
+- `trading_bot/utils/`: small shared helpers for artifacts, money, market time, and symbols.
+
 ## Setup
 
 ```bash

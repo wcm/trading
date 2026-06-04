@@ -5,9 +5,18 @@ import unittest
 from datetime import UTC, datetime
 
 from trading_bot.config import load_config
-from trading_bot.main import (
+from trading_bot.cli.parser import build_parser
+from trading_bot.cycles.run_cycle import (
     _build_run_cycle_artifact,
     _close_recommended_spreads,
+)
+from trading_bot.notifications.messages import (
+    _send_daily_trading_summary,
+    _send_order_poll_summary,
+    _send_watchlist_decision_summary,
+    _send_run_cycle_summary,
+)
+from trading_bot.scheduler.local import (
     _scheduler_cycle_args,
     _scheduler_cycle_json_output,
     _scheduler_daily_summary_due_date,
@@ -17,11 +26,6 @@ from trading_bot.main import (
     _scheduler_interval_minutes,
     _scheduler_open_interval_minutes,
     _scheduler_order_poll_limit,
-    _send_daily_trading_summary,
-    _send_order_poll_summary,
-    _send_watchlist_decision_summary,
-    _send_run_cycle_summary,
-    build_parser,
 )
 from trading_bot.notifications.discord import NotificationResult
 
