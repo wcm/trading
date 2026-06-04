@@ -1073,17 +1073,17 @@ Ops:
 
 ## 13. Immediate Next Step
 
-Next milestone: daily lifecycle and cost summaries.
+Next milestone: first supervised real paper order.
 
 Build this next:
 
-- Summarize daily order lifecycle changes from SQLite.
-- Summarize daily LLM usage and estimated spend.
-- Send one after-market Discord summary.
-- Add a scheduler option for the daily summary.
-- Then run one tiny full paper lifecycle: open, monitor, close, verify P&L.
+- Review the latest scheduler split and daily summary output.
+- Enable paper open execution deliberately for one supervised trade.
+- Keep quantity at 1 spread and keep paper execution locks easy to turn off.
+- Watch Discord order lifecycle, position monitor, daily summary, and SQLite logs.
+- Close the spread through the guarded paper close path and review P&L.
 
-The next milestone is not live trading. The next milestone is "the bot can explain what happened today without reading raw logs."
+The next milestone is not live trading. The next milestone is "one complete paper trade lifecycle is opened, monitored, closed, and understood."
 
 ## 14. Execution Progress
 
@@ -1098,6 +1098,8 @@ Current state:
 - SQLite logging is active for bot runs, option scans, LLM decisions, execution attempts, and order status events.
 - The bot can scan put credit spreads, build LLM decision packets, validate decisions, generate MLeg previews, monitor positions, run one local cycle, and run a market-hours scheduler.
 - Paper open and close execution paths exist but are disabled by default behind config and CLI locks.
+- The scheduler now uses a split cadence: 1-minute checks, monitor-only supervision when positions exist, 5-minute new-open decision cycles, order lifecycle polling each check, and one after-market daily summary.
+- Daily summaries focus on account equity, daily P&L, buying power, open positions, estimated open spread P&L, order lifecycle events, and execution attempts.
 - Order lifecycle polling works and currently reports zero recent Alpaca paper orders.
 - Paper option data uses Alpaca `indicative` because OPRA is not signed; live options trading should require OPRA.
 
@@ -1108,21 +1110,20 @@ Completed milestone groups:
 - Strategy and data: put credit spread scanner, conservative credit/max-loss math, liquidity checks, trend checks, quote freshness, event/earnings context, and news context.
 - LLM decisioning: OpenAI Responses API, strict JSON schema, prompt versioning, per-symbol watchlist decisions, mock mode, decision persistence, and validator guard rails.
 - Risk and execution gates: max-loss/open-risk checks, symbol/candidate checks, stale-data blocks, default-disabled paper open/close order submission, and execution-attempt logging.
-- Monitoring loop: position reconstruction, close previews, P&L estimates, hard exit flags, monitor-before-open `run-cycle`, non-overlap lock, and local market-hours scheduler.
-- Notifications: Discord summaries for scans, decisions, run cycles, execution attempts, scheduler heartbeat/errors, and order lifecycle changes.
+- Monitoring loop: position reconstruction, close previews, P&L estimates, hard exit flags, monitor-before-open `run-cycle`, non-overlap lock, split-cadence local scheduler, and daily trading summary.
+- Notifications: Discord summaries for scans, decisions, run cycles, execution attempts, scheduler heartbeat/errors, order lifecycle changes, and daily P&L/open-position summaries.
 - Tests: unit coverage for scanning, LLM packets, validation, liquidity/events/news blocks, allocation, order previews, execution gates, position monitoring, run-cycle/scheduler behavior, and order lifecycle polling.
 
 Latest verification:
 
-- `uv run python -m unittest discover -s tests` passed with 44 tests.
+- `uv run python -m unittest discover -s tests` passed with 49 tests.
 - `uv run python -m compileall src tests` passed.
 - `git diff --check` passed.
-- Live paper checks confirmed Alpaca connectivity, zero open positions, zero recent orders, and Discord notification delivery.
+- Live paper checks confirmed Alpaca connectivity, zero open positions, zero recent orders, daily-summary JSON generation, scheduler one-shot mock validation, and Discord notification delivery.
 
 Known gaps:
 
 - External earnings/calendar provider integration is still not implemented.
-- Daily lifecycle and LLM cost summaries are not implemented yet.
 - No full paper trade lifecycle has been opened, monitored, closed, and reviewed yet.
 - Cloud deployment is not started.
 - Live trading remains out of scope until paper promotion criteria, Level 3 options approval, and OPRA/live data readiness are satisfied.
@@ -1136,6 +1137,6 @@ Recent implementation commits:
 
 Latest milestone:
 
-- Added Alpaca order lifecycle polling.
-- Added Discord notifications for order status/fill changes.
-- Added scheduler-integrated order polling.
+- Added split scheduler cadence: 1-minute supervision and 5-minute open-decision cycles.
+- Added trading-focused daily summary.
+- Kept all paper order execution disabled unless config and CLI locks are deliberately enabled.

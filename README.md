@@ -127,8 +127,15 @@ Test the same cycle without calling OpenAI:
 uv run trading-bot run-cycle --symbols AAPL,MSFT --max-candidates 3 --mock-decision skip
 ```
 
+Build a trading-focused daily summary:
+
+```bash
+uv run trading-bot daily-summary --send-discord --json-output data/daily_summary.json
+```
+
 Run the local scheduler during US market hours. It defaults to one scheduler
-check every 3 minutes and one heartbeat every 60 minutes:
+check every 1 minute, one new-open decision cycle every 5 minutes, and one
+heartbeat every 60 minutes:
 
 ```bash
 uv run trading-bot schedule-local --send-discord --json-output-dir data/scheduler_cycles
@@ -144,6 +151,10 @@ Use `--send-cycle-discord` only when you want every scheduled cycle to also send
 the full run-cycle decision summary.
 The scheduler also polls recent Alpaca order statuses after each check unless
 `--skip-order-poll` is used.
+When positions are open, the scheduler runs monitor-only supervision on the
+1-minute tick; new open decisions run on the slower open interval. The
+after-market daily summary is sent at `runtime.scheduler_daily_summary_time_et`
+unless `--skip-daily-summary` is used.
 
 The decision packet includes account/position/order state, option candidates,
 intraday move, 30-minute moving-average trend context, option quote freshness,

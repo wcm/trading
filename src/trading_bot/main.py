@@ -5,9 +5,11 @@ import json
 import logging
 import os
 import time
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, time as dt_time
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, TextIO
+from zoneinfo import ZoneInfo
 
 from trading_bot.allocation import build_allocation_summary
 from trading_bot.brokers.alpaca import AlpacaClient, AlpacaCredentialsError
@@ -31,11 +33,14 @@ from trading_bot.storage.db import (
     record_llm_decision,
     record_option_scan,
     record_order_status_changes,
+    summarize_execution_attempts,
+    summarize_order_status_events,
 )
 from trading_bot.strategy.put_credit_spread import scan_put_credit_spreads
 
 
 DISCORD_CONTENT_LIMIT = 1900
+EASTERN = ZoneInfo("America/New_York")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -215,6 +220,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional path to write the order poll artifact JSON.",
     )
 
+    daily_summary = subparsers.add_parser(
+        "daily-summary",
+        help="Build a trading-focused daily summary.",
+    )
+    daily_summary.add_argument(
+        "--summary-date",
+        help="US/Eastern summary date in YYYY-MM-DD format. Defaults to today in US/Eastern time.",
+    )
+    daily_summary.add_argument(
+        "--option-feed",
+        choices=["indicative", "opra"],
+        help="Override Alpaca option data feed for open-position marking.",
+    )
+    daily_summary.add_argument(
+        "--send-discord",
+        action="store_true",
+        help="Send the daily summary to Discord.",
+    )
+    daily_summary.add_argument(
+        "--json-output",
+        help="Optional path to write the daily summary artifact JSON.",
+    )
+
     cycle = subparsers.add_parser(
         "run-cycle",
         help="Run one monitor-before-open bot cycle.",
@@ -284,6 +312,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Minutes to wait after each scheduler check. Defaults to runtime.scheduler_interval_minutes.",
     )
     scheduler.add_argument(
+        "--open-interval-minutes",
+        type=float,
+        help="Minutes between new-open run-cycle decisions. Defaults to runtime.scheduler_open_interval_minutes.",
+    )
+    scheduler.add_argument(
         "--heartbeat-minutes",
         type=float,
         help="Minutes between scheduler heartbeat messages. Defaults to runtime.scheduler_heartbeat_minutes.",
@@ -311,6 +344,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--order-poll-limit",
         type=int,
         help="Maximum Alpaca orders to poll after each scheduler check. Defaults to runtime.scheduler_order_poll_limit.",
+    )
+    scheduler.add_argument(
+        "--skip-daily-summary",
+        action="store_true",
+        help="Do not send the after-market daily trading summary.",
+    )
+    scheduler.add_argument(
+        "--daily-summary-time-et",
+        help="US/Eastern time for the daily summary in HH:MM format. Defaults to runtime.scheduler_daily_summary_time_et.",
     )
     scheduler.add_argument(
         "--mock-decision",
@@ -361,6 +403,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_position_monitor(args)
     if args.command == "poll-orders":
         return run_order_poll(args)
+    if args.command == "daily-summary":
+        return run_daily_summary(args)
     if args.command == "run-cycle":
         return run_cycle(args)
     if args.command == "schedule-local":
@@ -634,11 +678,20 @@ def run_cycle(args: argparse.Namespace) -> int:
 
 
 def run_local_scheduler(args: argparse.Namespace) -> int:
-    config, logger, db_path, _kill_switch, notifier = bootstrap(args)
+    config, logger, db_path, kill_switch, notifier = bootstrap(args)
     interval_minutes = _scheduler_interval_minutes(args, config)
+    open_interval_minutes = _scheduler_open_interval_minutes(args, config)
     heartbeat_minutes = _scheduler_heartbeat_minutes(args, config)
+    try:
+        daily_summary_time = _scheduler_daily_summary_time_et(args, config)
+    except ValueError as exc:
+        logger.error("%s", exc)
+        return 1
     if interval_minutes <= 0:
         logger.error("Scheduler interval must be positive: %s", interval_minutes)
+        return 1
+    if open_interval_minutes <= 0:
+        logger.error("Scheduler open interval must be positive: %s", open_interval_minutes)
         return 1
     if heartbeat_minutes < 0:
         logger.error("Scheduler heartbeat interval cannot be negative: %s", heartbeat_minutes)
@@ -652,8 +705,12 @@ def run_local_scheduler(args: argparse.Namespace) -> int:
 
     started_at = datetime.now(UTC).isoformat()
     logger.info(
-        "Starting local scheduler interval_minutes=%s heartbeat_minutes=%s once=%s ignore_market_hours=%s",
+        (
+            "Starting local scheduler interval_minutes=%s open_interval_minutes=%s "
+            "heartbeat_minutes=%s once=%s ignore_market_hours=%s"
+        ),
         interval_minutes,
+        open_interval_minutes,
         heartbeat_minutes,
         args.once,
         args.ignore_market_hours,
@@ -666,11 +723,14 @@ def run_local_scheduler(args: argparse.Namespace) -> int:
         details={
             "command": "schedule-local",
             "interval_minutes": interval_minutes,
+            "open_interval_minutes": open_interval_minutes,
             "heartbeat_minutes": heartbeat_minutes,
+            "daily_summary_time_et": daily_summary_time.strftime("%H:%M"),
             "once": args.once,
             "ignore_market_hours": args.ignore_market_hours,
             "send_cycle_discord": args.send_cycle_discord,
             "skip_order_poll": args.skip_order_poll,
+            "skip_daily_summary": args.skip_daily_summary,
         },
     )
 
@@ -681,19 +741,28 @@ def run_local_scheduler(args: argparse.Namespace) -> int:
             status="started",
             interval_minutes=interval_minutes,
             heartbeat_minutes=heartbeat_minutes,
-            details=f"cycle_discord={args.send_cycle_discord} once={args.once}",
+            details=(
+                f"open_interval={open_interval_minutes:g}m cycle_discord={args.send_cycle_discord} "
+                f"daily_summary={not args.skip_daily_summary} once={args.once}"
+            ),
         )
 
     cycle_count = 0
+    monitor_count = 0
     skipped_count = 0
     order_change_count = 0
+    daily_summary_count = 0
     error_count = 0
     last_status = "started"
     next_heartbeat_at = time.monotonic() + heartbeat_minutes * 60 if heartbeat_minutes > 0 else None
+    next_open_decision_at = 0.0
+    daily_summary_sent_dates: set[str] = set()
+    close_alerted_spread_ids: set[str] = set()
 
     try:
         while True:
             now = datetime.now(UTC)
+            tick_started = time.monotonic()
             try:
                 clock = alpaca.get_clock()
             except Exception as exc:  # noqa: BLE001 - scheduler should keep supervising after transient API errors
@@ -707,28 +776,83 @@ def run_local_scheduler(args: argparse.Namespace) -> int:
             else:
                 market_open = args.ignore_market_hours or bool(clock.get("is_open"))
                 if market_open:
-                    cycle_count += 1
-                    cycle_json_output = _scheduler_cycle_json_output(args, now)
-                    cycle_args = _scheduler_cycle_args(args, cycle_json_output)
-                    logger.info(
-                        "Scheduler running cycle %s json_output=%s cycle_discord=%s",
-                        cycle_count,
-                        cycle_json_output or "-",
-                        args.send_cycle_discord,
-                    )
-                    cycle_code = run_cycle(cycle_args)
-                    if cycle_code == 0:
-                        last_status = f"cycle_ok count={cycle_count}"
-                    else:
+                    positions: list[dict[str, Any]] = []
+                    position_error = None
+                    try:
+                        positions = alpaca.get_positions()
+                    except Exception as exc:  # noqa: BLE001 - scheduler should fail closed on state uncertainty
+                        position_error = str(exc)
                         error_count += 1
-                        last_status = f"cycle_failed code={cycle_code}"
+                        last_status = f"position_check_error: {exc}"
+                        logger.exception("Scheduler position check failed: %s", exc)
                         if args.send_discord:
-                            _send_scheduler_error(
-                                notifier,
-                                logger,
-                                phase="run-cycle",
-                                error=f"run-cycle exited with code {cycle_code}",
+                            _send_scheduler_error(notifier, logger, phase="positions", error=str(exc))
+
+                    open_due = tick_started >= next_open_decision_at
+                    if positions and not open_due:
+                        try:
+                            monitor_artifact = _run_scheduler_position_monitor(
+                                args=args,
+                                config=config,
+                                logger=logger,
+                                db_path=db_path,
+                                alpaca=alpaca,
+                                kill_switch=kill_switch,
+                                notifier=notifier,
+                                positions=positions,
                             )
+                        except Exception as exc:  # noqa: BLE001 - scheduler should keep supervising
+                            error_count += 1
+                            last_status = f"monitor_error: {exc}"
+                            logger.exception("Scheduler position monitor failed: %s", exc)
+                            if args.send_discord:
+                                _send_scheduler_error(notifier, logger, phase="monitor-positions", error=str(exc))
+                        else:
+                            monitor_count += 1
+                            close_spreads = _close_recommended_spreads(monitor_artifact)
+                            close_ids = {str(spread.get("spread_id")) for spread in close_spreads}
+                            new_close_ids = close_ids - close_alerted_spread_ids
+                            if args.send_discord and new_close_ids:
+                                _send_position_monitor_summary(notifier, monitor_artifact, logger)
+                            close_alerted_spread_ids.update(close_ids)
+                            if not close_ids:
+                                close_alerted_spread_ids.clear()
+                            last_status = (
+                                f"monitor_ok spreads={monitor_artifact.get('spread_count')} "
+                                f"close_recommended={len(close_spreads)}"
+                            )
+                    elif not positions and not position_error:
+                        close_alerted_spread_ids.clear()
+
+                    if open_due:
+                        next_open_decision_at = tick_started + open_interval_minutes * 60
+                        if position_error:
+                            logger.warning("Skipping new open decision because position check failed")
+                        else:
+                            cycle_count += 1
+                            if positions:
+                                monitor_count += 1
+                            cycle_json_output = _scheduler_cycle_json_output(args, now)
+                            cycle_args = _scheduler_cycle_args(args, cycle_json_output)
+                            logger.info(
+                                "Scheduler running open decision cycle %s json_output=%s cycle_discord=%s",
+                                cycle_count,
+                                cycle_json_output or "-",
+                                args.send_cycle_discord,
+                            )
+                            cycle_code = run_cycle(cycle_args)
+                            if cycle_code == 0:
+                                last_status = f"open_cycle_ok count={cycle_count}"
+                            else:
+                                error_count += 1
+                                last_status = f"open_cycle_failed code={cycle_code}"
+                                if args.send_discord:
+                                    _send_scheduler_error(
+                                        notifier,
+                                        logger,
+                                        phase="run-cycle",
+                                        error=f"run-cycle exited with code {cycle_code}",
+                                    )
                 else:
                     skipped_count += 1
                     last_status = (
@@ -736,6 +860,7 @@ def run_local_scheduler(args: argparse.Namespace) -> int:
                     )
                     logger.info("Scheduler skipped cycle because Alpaca market is closed: %s", last_status)
 
+                order_poll = None
                 if not args.skip_order_poll:
                     try:
                         order_poll = _poll_order_status_changes(
@@ -757,6 +882,59 @@ def run_local_scheduler(args: argparse.Namespace) -> int:
                         if args.send_discord and order_poll.get("changes"):
                             _send_order_poll_summary(notifier, order_poll, logger)
 
+                summary_date = _scheduler_daily_summary_due_date(
+                    now,
+                    daily_summary_time=daily_summary_time,
+                    sent_dates=daily_summary_sent_dates,
+                )
+                if (
+                    summary_date is not None
+                    and not args.skip_daily_summary
+                    and not market_open
+                    and (args.send_discord or args.json_output_dir)
+                ):
+                    try:
+                        daily_summary = _build_daily_trading_summary(
+                            config=config,
+                            db_path=db_path,
+                            alpaca=alpaca,
+                            option_feed=args.option_feed,
+                            summary_date=summary_date,
+                            order_poll=order_poll if not args.skip_order_poll else None,
+                        )
+                    except Exception as exc:  # noqa: BLE001 - scheduler should keep supervising
+                        error_count += 1
+                        last_status = f"daily_summary_error: {exc}"
+                        logger.exception("Scheduler daily summary failed: %s", exc)
+                        if args.send_discord:
+                            _send_scheduler_error(notifier, logger, phase="daily-summary", error=str(exc))
+                    else:
+                        summary_path = _scheduler_daily_summary_json_output(args, summary_date)
+                        if summary_path:
+                            _write_json_artifact(summary_path, daily_summary, logger, "daily trading summary")
+                        discord_ok = True
+                        if args.send_discord:
+                            discord_ok = _send_daily_trading_summary(notifier, daily_summary, logger)
+                        daily_summary_sent_dates.add(summary_date.isoformat())
+                        daily_summary_count += 1
+                        summary_status = _daily_summary_bot_run_status(args.send_discord, discord_ok)
+                        last_status = f"{summary_status} date={summary_date.isoformat()}"
+                        record_bot_run(
+                            db_path,
+                            started_at=datetime.now(UTC).isoformat(),
+                            mode=config.mode,
+                            status=summary_status,
+                            details={
+                                "command": "daily-summary",
+                                "summary_date": summary_date.isoformat(),
+                                "source": "schedule-local",
+                                "discord_requested": args.send_discord,
+                                "discord_ok": discord_ok,
+                            },
+                        )
+                        if not discord_ok:
+                            error_count += 1
+
             if args.once:
                 break
 
@@ -772,8 +950,9 @@ def run_local_scheduler(args: argparse.Namespace) -> int:
                     interval_minutes=interval_minutes,
                     heartbeat_minutes=heartbeat_minutes,
                     details=(
-                        f"{last_status}; cycles={cycle_count}; skipped={skipped_count}; "
-                        f"order_changes={order_change_count}; errors={error_count}"
+                        f"{last_status}; open_cycles={cycle_count}; monitors={monitor_count}; "
+                        f"skipped={skipped_count}; order_changes={order_change_count}; "
+                        f"daily_summaries={daily_summary_count}; errors={error_count}"
                     ),
                 )
                 next_heartbeat_at = time.monotonic() + heartbeat_minutes * 60
@@ -793,9 +972,11 @@ def run_local_scheduler(args: argparse.Namespace) -> int:
         status=final_status,
         details={
             "command": "schedule-local",
-            "cycles": cycle_count,
+            "open_cycles": cycle_count,
+            "monitors": monitor_count,
             "skipped": skipped_count,
             "order_changes": order_change_count,
+            "daily_summaries": daily_summary_count,
             "errors": error_count,
             "last_status": last_status,
         },
@@ -808,8 +989,9 @@ def run_local_scheduler(args: argparse.Namespace) -> int:
             interval_minutes=interval_minutes,
             heartbeat_minutes=heartbeat_minutes,
             details=(
-                f"{last_status}; cycles={cycle_count}; skipped={skipped_count}; "
-                f"order_changes={order_change_count}; errors={error_count}"
+                f"{last_status}; open_cycles={cycle_count}; monitors={monitor_count}; "
+                f"skipped={skipped_count}; order_changes={order_change_count}; "
+                f"daily_summaries={daily_summary_count}; errors={error_count}"
             ),
         )
     return 0 if error_count == 0 else 1
@@ -1136,6 +1318,60 @@ def run_order_poll(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_daily_summary(args: argparse.Namespace) -> int:
+    config, logger, db_path, _kill_switch, notifier = bootstrap(args)
+    summary_date = _daily_summary_date_from_arg(args.summary_date)
+    logger.info("Starting daily trading summary date=%s", summary_date.isoformat())
+
+    try:
+        alpaca = AlpacaClient.from_config(config)
+    except AlpacaCredentialsError as exc:
+        logger.error("%s", exc)
+        return 1
+
+    try:
+        order_poll = _poll_order_status_changes(
+            config=config,
+            logger=logger,
+            db_path=db_path,
+            alpaca=alpaca,
+            status="all",
+            limit=int(config.get("runtime", "scheduler_order_poll_limit", default=50)),
+        )
+        artifact = _build_daily_trading_summary(
+            config=config,
+            db_path=db_path,
+            alpaca=alpaca,
+            option_feed=args.option_feed,
+            summary_date=summary_date,
+            order_poll=order_poll,
+        )
+    except Exception as exc:  # noqa: BLE001 - report broker/API errors cleanly in CLI
+        logger.exception("Daily trading summary failed: %s", exc)
+        return 1
+
+    if args.json_output:
+        _write_json_artifact(args.json_output, artifact, logger, "daily trading summary")
+
+    discord_ok = True
+    if args.send_discord:
+        discord_ok = _send_daily_trading_summary(notifier, artifact, logger)
+
+    record_bot_run(
+        db_path,
+        started_at=datetime.now(UTC).isoformat(),
+        mode=config.mode,
+        status=_daily_summary_bot_run_status(args.send_discord, discord_ok),
+        details={
+            "command": "daily-summary",
+            "summary_date": summary_date.isoformat(),
+            "discord_requested": args.send_discord,
+            "discord_ok": discord_ok,
+        },
+    )
+    return 0 if discord_ok else 1
+
+
 def _poll_order_status_changes(
     *,
     config,
@@ -1179,6 +1415,147 @@ def _poll_order_status_changes(
         "changes": changes,
         "orders": orders,
     }
+
+
+def _build_daily_trading_summary(
+    *,
+    config,
+    db_path: Path,
+    alpaca: AlpacaClient,
+    option_feed: str | None,
+    summary_date: date,
+    order_poll: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    start_at, end_at = _eastern_date_window_utc(summary_date)
+    account = alpaca.get_account()
+    positions = alpaca.get_positions()
+    monitor_result = monitor_put_credit_spreads(
+        config=config,
+        alpaca=alpaca,
+        positions=positions,
+        option_feed=option_feed,
+    )
+    open_orders = alpaca.get_orders(status="open", limit=50)
+    recent_orders = (
+        order_poll.get("orders")
+        if isinstance(order_poll, dict) and isinstance(order_poll.get("orders"), list)
+        else alpaca.get_orders(status="all", limit=50)
+    )
+    monitor_artifact = monitor_result.to_dict()
+    order_events = summarize_order_status_events(
+        db_path,
+        mode=config.mode,
+        start_at=start_at,
+        end_at=end_at,
+    )
+    execution_attempts = summarize_execution_attempts(
+        db_path,
+        mode=config.mode,
+        start_at=start_at,
+        end_at=end_at,
+    )
+    open_spread_pnl = _sum_decimal_strings(
+        [spread.get("estimated_unrealized_pnl") for spread in monitor_artifact.get("spreads", [])]
+    )
+    close_recommended = _close_recommended_spreads(monitor_artifact)
+    return {
+        "generated_at": datetime.now(UTC).isoformat(),
+        "mode": config.mode,
+        "summary_date": summary_date.isoformat(),
+        "timezone": "America/New_York",
+        "window": {
+            "start_at": start_at,
+            "end_at": end_at,
+        },
+        "account": _daily_account_summary(account),
+        "positions": {
+            "broker_position_count": len(positions),
+            "option_position_count": monitor_artifact.get("option_position_count"),
+            "spread_count": monitor_artifact.get("spread_count"),
+            "unpaired_leg_count": len(monitor_artifact.get("unpaired_legs", [])),
+            "estimated_open_spread_pnl": _format_optional_decimal(open_spread_pnl),
+            "close_recommended_count": len(close_recommended),
+            "spreads": monitor_artifact.get("spreads", []),
+            "unpaired_legs": monitor_artifact.get("unpaired_legs", []),
+        },
+        "orders": {
+            "open_order_count": len(open_orders),
+            "recent_order_count": len(recent_orders),
+            "lifecycle_events": order_events,
+            "latest_poll": {
+                "change_count": order_poll.get("change_count") if isinstance(order_poll, dict) else None,
+                "order_count": order_poll.get("order_count") if isinstance(order_poll, dict) else None,
+            },
+        },
+        "execution_attempts": execution_attempts,
+    }
+
+
+def _daily_account_summary(account: dict[str, Any]) -> dict[str, Any]:
+    equity = _decimal_or_none(account.get("equity"))
+    last_equity = _decimal_or_none(account.get("last_equity"))
+    daily_pnl = equity - last_equity if equity is not None and last_equity is not None else None
+    return {
+        "status": account.get("status"),
+        "equity": _format_optional_decimal(equity),
+        "last_equity": _format_optional_decimal(last_equity),
+        "daily_pnl": _format_optional_decimal(daily_pnl),
+        "buying_power": _format_optional_decimal(_decimal_or_none(account.get("buying_power"))),
+        "cash": _format_optional_decimal(_decimal_or_none(account.get("cash"))),
+        "portfolio_value": _format_optional_decimal(_decimal_or_none(account.get("portfolio_value"))),
+    }
+
+
+def _daily_summary_date_from_arg(value: str | None) -> date:
+    if value:
+        return date.fromisoformat(value)
+    return datetime.now(UTC).astimezone(EASTERN).date()
+
+
+def _daily_summary_bot_run_status(discord_requested: bool, discord_ok: bool) -> str:
+    if not discord_ok:
+        return "daily_summary_failed"
+    return "daily_summary_sent" if discord_requested else "daily_summary_built"
+
+
+def _eastern_date_window_utc(summary_date: date) -> tuple[str, str]:
+    start = datetime.combine(summary_date, dt_time.min, tzinfo=EASTERN).astimezone(UTC)
+    end = datetime.combine(date.fromordinal(summary_date.toordinal() + 1), dt_time.min, tzinfo=EASTERN)
+    end = end.astimezone(UTC)
+    return start.isoformat(), end.isoformat()
+
+
+def _decimal_or_none(value: Any) -> Decimal | None:
+    if value is None:
+        return None
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
+
+
+def _sum_decimal_strings(values: list[Any]) -> Decimal | None:
+    total = Decimal("0")
+    seen = False
+    for value in values:
+        parsed = _decimal_or_none(value)
+        if parsed is None:
+            continue
+        total += parsed
+        seen = True
+    return total if seen else None
+
+
+def _format_optional_decimal(value: Decimal | None) -> str | None:
+    if value is None:
+        return None
+    return str(value.quantize(Decimal("0.01")))
+
+
+def _format_counts(counts: dict[str, Any]) -> str:
+    if not counts:
+        return "none"
+    return ", ".join(f"{key}={value}" for key, value in sorted(counts.items()))
 
 
 def _write_json_artifact(
@@ -1346,10 +1723,51 @@ def _release_run_cycle_lock(handle: TextIO, logger: logging.Logger) -> None:
     logger.info("Released run-cycle lock at %s", lock_path)
 
 
+def _run_scheduler_position_monitor(
+    *,
+    args: argparse.Namespace,
+    config,
+    logger: logging.Logger,
+    db_path: Path,
+    alpaca: AlpacaClient,
+    kill_switch: KillSwitch,
+    notifier: DiscordNotifier,
+    positions: list[dict[str, Any]],
+) -> dict[str, Any]:
+    result = monitor_put_credit_spreads(
+        config=config,
+        alpaca=alpaca,
+        positions=positions,
+        option_feed=args.option_feed,
+    )
+    _log_position_monitor_result(logger, result)
+    artifact = result.to_dict()
+    close_execution_attempts = []
+    if args.submit_paper_close and _close_recommended_spreads(artifact):
+        close_execution_attempts = _maybe_execute_recommended_closes(
+            config=config,
+            logger=logger,
+            db_path=db_path,
+            alpaca=alpaca,
+            kill_switch=kill_switch,
+            notifier=notifier,
+            monitor_artifact=artifact,
+            submit_requested=True,
+        )
+    artifact["close_execution_attempts"] = close_execution_attempts
+    return artifact
+
+
 def _scheduler_interval_minutes(args: argparse.Namespace, config) -> float:
     if args.interval_minutes is not None:
         return float(args.interval_minutes)
-    return float(config.get("runtime", "scheduler_interval_minutes", default=3))
+    return float(config.get("runtime", "scheduler_interval_minutes", default=1))
+
+
+def _scheduler_open_interval_minutes(args: argparse.Namespace, config) -> float:
+    if args.open_interval_minutes is not None:
+        return float(args.open_interval_minutes)
+    return float(config.get("runtime", "scheduler_open_interval_minutes", default=5))
 
 
 def _scheduler_heartbeat_minutes(args: argparse.Namespace, config) -> float:
@@ -1364,12 +1782,51 @@ def _scheduler_order_poll_limit(args: argparse.Namespace, config) -> int:
     return int(config.get("runtime", "scheduler_order_poll_limit", default=50))
 
 
+def _scheduler_daily_summary_time_et(args: argparse.Namespace, config) -> dt_time:
+    value = args.daily_summary_time_et or str(
+        config.get("runtime", "scheduler_daily_summary_time_et", default="16:05")
+    )
+    return _parse_hhmm_time(value)
+
+
+def _parse_hhmm_time(value: str) -> dt_time:
+    try:
+        hour_raw, minute_raw = value.split(":", maxsplit=1)
+        return dt_time(hour=int(hour_raw), minute=int(minute_raw))
+    except (ValueError, TypeError) as exc:
+        raise ValueError(f"Expected HH:MM time, got {value!r}") from exc
+
+
+def _scheduler_daily_summary_due_date(
+    now: datetime,
+    *,
+    daily_summary_time: dt_time,
+    sent_dates: set[str],
+) -> date | None:
+    now_et = now.astimezone(EASTERN)
+    summary_date = now_et.date()
+    if summary_date.weekday() >= 5:
+        return None
+    if summary_date.isoformat() in sent_dates:
+        return None
+    if now_et.time() < daily_summary_time:
+        return None
+    return summary_date
+
+
 def _scheduler_cycle_json_output(args: argparse.Namespace, now: datetime) -> str | None:
     if not args.json_output_dir:
         return None
     output_dir = resolve_path(args.json_output_dir)
     timestamp = now.strftime("%Y%m%dT%H%M%SZ")
     return str(output_dir / f"run_cycle_{timestamp}.json")
+
+
+def _scheduler_daily_summary_json_output(args: argparse.Namespace, summary_date: date) -> str | None:
+    if not args.json_output_dir:
+        return None
+    output_dir = resolve_path(args.json_output_dir)
+    return str(output_dir / f"daily_summary_{summary_date.isoformat()}.json")
 
 
 def _scheduler_cycle_args(args: argparse.Namespace, json_output: str | None) -> argparse.Namespace:
@@ -1877,6 +2334,59 @@ def _send_order_poll_summary(
 
     messages = _split_discord_content("\n".join(lines))
     return _send_discord_messages(notifier, messages, logger, "order lifecycle update")
+
+
+def _send_daily_trading_summary(
+    notifier: DiscordNotifier,
+    artifact: dict[str, Any],
+    logger: logging.Logger,
+) -> bool:
+    account = artifact.get("account") or {}
+    positions = artifact.get("positions") or {}
+    orders = artifact.get("orders") or {}
+    lifecycle = orders.get("lifecycle_events") or {}
+    attempts = artifact.get("execution_attempts") or {}
+    lines = [
+        "Daily trading summary",
+        f"Date: {artifact.get('summary_date')} ET",
+        f"Mode: {artifact.get('mode')}",
+        (
+            f"Equity: {account.get('equity')} "
+            f"daily P&L: {account.get('daily_pnl')} "
+            f"buying power: {account.get('buying_power')}"
+        ),
+        (
+            f"Open positions: broker={positions.get('broker_position_count')} "
+            f"option={positions.get('option_position_count')} spreads={positions.get('spread_count')}"
+        ),
+        f"Estimated open spread P&L: {positions.get('estimated_open_spread_pnl')}",
+        f"Close recommendations: {positions.get('close_recommended_count')}",
+        (
+            f"Orders: open_now={orders.get('open_order_count')} "
+            f"recent_polled={orders.get('recent_order_count')} "
+            f"events_today={lifecycle.get('total')}"
+        ),
+        f"Order event statuses: {_format_counts(lifecycle.get('by_status') or {})}",
+        (
+            f"Execution attempts: total={attempts.get('total')} "
+            f"requested={attempts.get('requested')} submitted={attempts.get('submitted')}"
+        ),
+        f"Execution statuses: {_format_counts(attempts.get('by_status') or {})}",
+    ]
+    spreads = positions.get("spreads") or []
+    if spreads:
+        lines.append("Open spreads:")
+        for spread in spreads[:10]:
+            lines.append(
+                f"- {spread.get('spread_id')} qty={spread.get('quantity')} "
+                f"dte={spread.get('dte')} pnl={spread.get('estimated_unrealized_pnl')} "
+                f"close={spread.get('close_recommended')}"
+            )
+    else:
+        lines.append("Open spreads: none")
+
+    messages = _split_discord_content("\n".join(lines))
+    return _send_discord_messages(notifier, messages, logger, "daily trading summary")
 
 
 def _close_execution_status_lines(close_execution_attempts: list[dict[str, Any]]) -> list[str]:

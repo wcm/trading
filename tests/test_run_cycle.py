@@ -10,9 +10,14 @@ from trading_bot.main import (
     _close_recommended_spreads,
     _scheduler_cycle_args,
     _scheduler_cycle_json_output,
+    _scheduler_daily_summary_due_date,
+    _scheduler_daily_summary_json_output,
+    _scheduler_daily_summary_time_et,
     _scheduler_heartbeat_minutes,
     _scheduler_interval_minutes,
+    _scheduler_open_interval_minutes,
     _scheduler_order_poll_limit,
+    _send_daily_trading_summary,
     _send_order_poll_summary,
     _send_watchlist_decision_summary,
     _send_run_cycle_summary,
@@ -122,7 +127,9 @@ class RunCycleTests(unittest.TestCase):
                 "--symbols",
                 "AAPL,MSFT",
                 "--interval-minutes",
-                "3",
+                "1",
+                "--open-interval-minutes",
+                "5",
                 "--heartbeat-minutes",
                 "30",
                 "--send-discord",
@@ -131,6 +138,9 @@ class RunCycleTests(unittest.TestCase):
                 "--skip-order-poll",
                 "--order-poll-limit",
                 "25",
+                "--skip-daily-summary",
+                "--daily-summary-time-et",
+                "16:10",
                 "--once",
                 "--ignore-market-hours",
                 "--mock-decision",
@@ -140,13 +150,16 @@ class RunCycleTests(unittest.TestCase):
 
         self.assertEqual(args.command, "schedule-local")
         self.assertEqual(args.symbols, "AAPL,MSFT")
-        self.assertEqual(args.interval_minutes, 3)
+        self.assertEqual(args.interval_minutes, 1)
+        self.assertEqual(args.open_interval_minutes, 5)
         self.assertEqual(args.heartbeat_minutes, 30)
         self.assertTrue(args.send_discord)
         self.assertTrue(args.send_cycle_discord)
         self.assertTrue(args.submit_paper_close)
         self.assertTrue(args.skip_order_poll)
         self.assertEqual(args.order_poll_limit, 25)
+        self.assertTrue(args.skip_daily_summary)
+        self.assertEqual(args.daily_summary_time_et, "16:10")
         self.assertTrue(args.once)
         self.assertTrue(args.ignore_market_hours)
 
@@ -172,6 +185,26 @@ class RunCycleTests(unittest.TestCase):
         self.assertTrue(args.notify_no_changes)
         self.assertEqual(args.json_output, "data/order_poll.json")
 
+    def test_parser_accepts_daily_summary_args(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "daily-summary",
+                "--summary-date",
+                "2026-06-04",
+                "--option-feed",
+                "indicative",
+                "--send-discord",
+                "--json-output",
+                "data/daily_summary.json",
+            ]
+        )
+
+        self.assertEqual(args.command, "daily-summary")
+        self.assertEqual(args.summary_date, "2026-06-04")
+        self.assertEqual(args.option_feed, "indicative")
+        self.assertTrue(args.send_discord)
+        self.assertEqual(args.json_output, "data/daily_summary.json")
+
     def test_scheduler_defaults_and_cycle_args(self) -> None:
         config = load_config("config/settings.yaml")
         args = build_parser().parse_args(
@@ -186,9 +219,11 @@ class RunCycleTests(unittest.TestCase):
             ]
         )
 
-        self.assertEqual(_scheduler_interval_minutes(args, config), 3)
+        self.assertEqual(_scheduler_interval_minutes(args, config), 1)
+        self.assertEqual(_scheduler_open_interval_minutes(args, config), 5)
         self.assertEqual(_scheduler_heartbeat_minutes(args, config), 60)
         self.assertEqual(_scheduler_order_poll_limit(args, config), 50)
+        self.assertEqual(_scheduler_daily_summary_time_et(args, config).strftime("%H:%M"), "16:05")
 
         cycle_args = _scheduler_cycle_args(args, "data/test_cycle.json")
         self.assertEqual(cycle_args.command, "run-cycle")
@@ -211,6 +246,32 @@ class RunCycleTests(unittest.TestCase):
         self.assertIsNotNone(path)
         assert path is not None
         self.assertTrue(path.endswith("data/scheduler_cycles/run_cycle_20260604T153000Z.json"))
+
+    def test_scheduler_daily_summary_helpers(self) -> None:
+        args = build_parser().parse_args(
+            ["schedule-local", "--json-output-dir", "data/scheduler_cycles"]
+        )
+
+        path = _scheduler_daily_summary_json_output(
+            args,
+            datetime(2026, 6, 4, tzinfo=UTC).date(),
+        )
+        due = _scheduler_daily_summary_due_date(
+            datetime(2026, 6, 4, 20, 6, tzinfo=UTC),
+            daily_summary_time=_scheduler_daily_summary_time_et(args, load_config("config/settings.yaml")),
+            sent_dates=set(),
+        )
+        not_due = _scheduler_daily_summary_due_date(
+            datetime(2026, 6, 4, 19, 59, tzinfo=UTC),
+            daily_summary_time=_scheduler_daily_summary_time_et(args, load_config("config/settings.yaml")),
+            sent_dates=set(),
+        )
+
+        self.assertIsNotNone(path)
+        assert path is not None
+        self.assertTrue(path.endswith("data/scheduler_cycles/daily_summary_2026-06-04.json"))
+        self.assertEqual(due, datetime(2026, 6, 4, tzinfo=UTC).date())
+        self.assertIsNone(not_due)
 
     def test_cycle_artifact_skips_open_decisions_when_close_is_recommended(self) -> None:
         config = load_config("config/settings.yaml")
@@ -329,6 +390,58 @@ class RunCycleTests(unittest.TestCase):
         self.assertIn("Changes: 12", content)
         self.assertIn("order-0", content)
         self.assertIn("order-11", content)
+
+    def test_daily_trading_summary_discord_focuses_on_pnl_positions_orders(self) -> None:
+        notifier = FakeNotifier()
+        artifact = {
+            "summary_date": "2026-06-04",
+            "mode": "paper",
+            "account": {
+                "equity": "100500.00",
+                "daily_pnl": "500.00",
+                "buying_power": "198000.00",
+            },
+            "positions": {
+                "broker_position_count": 2,
+                "option_position_count": 2,
+                "spread_count": 1,
+                "estimated_open_spread_pnl": "65.00",
+                "close_recommended_count": 0,
+                "spreads": [
+                    {
+                        "spread_id": "AAPL-2026-06-12-190P-185P",
+                        "quantity": 1,
+                        "dte": 8,
+                        "estimated_unrealized_pnl": "65.00",
+                        "close_recommended": False,
+                    }
+                ],
+            },
+            "orders": {
+                "open_order_count": 0,
+                "recent_order_count": 2,
+                "lifecycle_events": {
+                    "total": 2,
+                    "by_status": {"filled": 1, "new": 1},
+                },
+            },
+            "execution_attempts": {
+                "total": 1,
+                "requested": 1,
+                "submitted": 1,
+                "by_status": {"submitted": 1},
+            },
+        }
+
+        ok = _send_daily_trading_summary(notifier, artifact, logging.getLogger("test"))
+
+        self.assertTrue(ok)
+        content = "\n".join(notifier.messages)
+        self.assertIn("daily P&L: 500.00", content)
+        self.assertIn("Open positions: broker=2 option=2 spreads=1", content)
+        self.assertIn("Estimated open spread P&L: 65.00", content)
+        self.assertIn("Order event statuses: filled=1, new=1", content)
+        self.assertNotIn("LLM", content)
 
 
 if __name__ == "__main__":

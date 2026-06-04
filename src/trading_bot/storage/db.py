@@ -341,6 +341,138 @@ def record_order_status_changes(
     return changes
 
 
+def summarize_order_status_events(
+    db_path: Path,
+    *,
+    mode: str,
+    start_at: str,
+    end_at: str,
+    recent_limit: int = 20,
+) -> dict[str, Any]:
+    with closing(sqlite3.connect(db_path)) as conn:
+        total = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM order_status_events
+            WHERE mode = ? AND observed_at >= ? AND observed_at < ?
+            """,
+            (mode, start_at, end_at),
+        ).fetchone()[0]
+        by_status = {
+            str(status or "unknown"): int(count)
+            for status, count in conn.execute(
+                """
+                SELECT status, COUNT(*)
+                FROM order_status_events
+                WHERE mode = ? AND observed_at >= ? AND observed_at < ?
+                GROUP BY status
+                ORDER BY status
+                """,
+                (mode, start_at, end_at),
+            ).fetchall()
+        }
+        recent = [
+            {
+                "observed_at": row[0],
+                "broker_order_id": row[1],
+                "client_order_id": row[2],
+                "symbol": row[3],
+                "status": row[4],
+                "filled_qty": row[5],
+                "qty": row[6],
+                "order_class": row[7],
+            }
+            for row in conn.execute(
+                """
+                SELECT
+                    observed_at,
+                    broker_order_id,
+                    client_order_id,
+                    symbol,
+                    status,
+                    filled_qty,
+                    qty,
+                    order_class
+                FROM order_status_events
+                WHERE mode = ? AND observed_at >= ? AND observed_at < ?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (mode, start_at, end_at, recent_limit),
+            ).fetchall()
+        ]
+    return {
+        "total": int(total),
+        "by_status": by_status,
+        "recent": recent,
+    }
+
+
+def summarize_execution_attempts(
+    db_path: Path,
+    *,
+    mode: str,
+    start_at: str,
+    end_at: str,
+    recent_limit: int = 20,
+) -> dict[str, Any]:
+    with closing(sqlite3.connect(db_path)) as conn:
+        row = conn.execute(
+            """
+            SELECT COUNT(*), COALESCE(SUM(requested), 0), COALESCE(SUM(submitted), 0)
+            FROM execution_attempts
+            WHERE mode = ? AND created_at >= ? AND created_at < ?
+            """,
+            (mode, start_at, end_at),
+        ).fetchone()
+        by_status = {
+            str(status or "unknown"): int(count)
+            for status, count in conn.execute(
+                """
+                SELECT status, COUNT(*)
+                FROM execution_attempts
+                WHERE mode = ? AND created_at >= ? AND created_at < ?
+                GROUP BY status
+                ORDER BY status
+                """,
+                (mode, start_at, end_at),
+            ).fetchall()
+        }
+        recent = [
+            {
+                "created_at": item[0],
+                "requested": bool(item[1]),
+                "submitted": bool(item[2]),
+                "status": item[3],
+                "broker_error": item[4],
+                "block_reasons": json.loads(item[5]),
+            }
+            for item in conn.execute(
+                """
+                SELECT
+                    created_at,
+                    requested,
+                    submitted,
+                    status,
+                    broker_error,
+                    block_reasons_json
+                FROM execution_attempts
+                WHERE mode = ? AND created_at >= ? AND created_at < ?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (mode, start_at, end_at, recent_limit),
+            ).fetchall()
+        ]
+    return {
+        "total": int(row[0]),
+        "requested": int(row[1]),
+        "submitted": int(row[2]),
+        "by_status": by_status,
+        "recent": recent,
+    }
+
+
 def _string_or_none(value: Any) -> str | None:
     if value is None:
         return None

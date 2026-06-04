@@ -129,7 +129,9 @@ storage:
 runtime:
   kill_switch_path: KILL_SWITCH
   cycle_lock_path: data/run_cycle.lock
-  scheduler_interval_minutes: 3
+  scheduler_interval_minutes: 1
+  scheduler_open_interval_minutes: 5
   scheduler_heartbeat_minutes: 60
   scheduler_order_poll_limit: 50
+  scheduler_daily_summary_time_et: "16:05"
   log_dir: logs
