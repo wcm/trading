@@ -1110,6 +1110,7 @@ Completed:
 - Added scan-run and scan-candidate SQLite tables.
 - Added Discord scan summary support.
 - Added read-only LLM decision command: `uv run trading-bot decide`.
+- Added independent per-symbol watchlist decision command: `uv run trading-bot decide-watchlist`.
 - Added OpenAI Responses API integration with strict Structured Outputs JSON schema.
 - Added decision packet builder with account, clock, positions, orders, scan candidates, risk limits, and placeholder news context.
 - Added LLM decision persistence with packet, prompt version, response, raw response, validator errors, and accepted/rejected flag.
@@ -1130,10 +1131,14 @@ Completed:
 - Added manual next earnings dates for AMD and META for paper testing.
 - Raised paper `risk.max_loss_per_trade` from USD 500 to USD 1,000 and `risk.max_open_risk` from USD 1,500 to USD 5,000 to match the aggressive paper experiment with a capped total exposure budget.
 - Relaxed `liquidity.max_leg_spread_absolute` from USD 0.20 to USD 0.50 while keeping the 15% spread-of-mid filter.
+- Added deterministic allocator ranking for accepted per-symbol `open` decisions.
+- Added combined watchlist decision JSON artifact with per-symbol decisions and allocator-selected open.
+- Added one-message Discord summary support for watchlist decision runs.
 - Added unit tests for config loading and put credit spread candidate construction.
 - Added unit tests for LLM decision packet construction and validator rejection paths.
 - Added unit test for stale market data blocking `market_trend_ok`.
 - Added unit tests for candidate liquidity fields, earnings/event blocking, and high-risk news blocking.
+- Added unit tests for deterministic allocator selection.
 - Updated paper-mode option data feed to `indicative` because Alpaca returned `OPRA agreement is not signed`.
 - Kept `opra` as the required live-mode target feed before real options execution.
 
@@ -1151,6 +1156,8 @@ Verified:
 - `uv run trading-bot scan-options --symbols AMD,QQQ,AAPL,MSFT,NVDA,AMZN,META,GOOGL,TSLA --max-candidates 30 --json-output data/last_option_scan_broad.json`
 - `uv run trading-bot decide --symbols AMD,QQQ,AAPL,MSFT,NVDA,AMZN,META,GOOGL,TSLA --max-candidates 30 --send-discord --json-output data/last_decision_broad.json`
 - `uv run trading-bot decide --symbols META --max-candidates 10 --send-discord --json-output data/last_decision_meta_aggressive.json`
+- `uv run trading-bot decide-watchlist --symbols AAPL,MSFT --max-candidates 3 --mock-decision skip --json-output data/last_decide_watchlist_mock.json`
+- `uv run trading-bot decide-watchlist --symbols AAPL,MSFT --max-candidates 10 --json-output data/last_decide_watchlist_openai_smoke.json`
 - `uv run python -m unittest discover -s tests`
 - `uv run python -m compileall src tests`
 - `git diff --check`
@@ -1167,6 +1174,8 @@ Current known state:
 - Quote freshness is included in spread candidates and enforced by the validator for `open` decisions.
 - Candidate liquidity is included in spread candidates and enforced by the validator for `open` decisions.
 - Manual paper-mode earnings/event context is included in the LLM packet and enforced by the validator for `open` decisions.
+- Independent per-symbol watchlist decisions work in mock mode and produce one allocator summary.
+- The allocator currently ranks accepted opens by confidence, then reward/risk, then max profit.
 - External earnings/calendar provider integration is still not implemented.
 - The latest real LLM decision accepted by the validator is an `open` recommendation for a read-only META put credit spread: `META-2026-06-12-597.50P-592.50P`, quantity 1, credit limit `-1.02`, max loss USD 398.
 - OPRA is not currently enabled because the OPRA agreement is not signed.

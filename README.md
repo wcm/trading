@@ -61,6 +61,12 @@ Run a read-only LLM decision from live paper-market candidates:
 uv run trading-bot decide --symbols QQQ --max-candidates 2 --send-discord
 ```
 
+Run independent per-symbol decisions across the watchlist and let the deterministic allocator pick the best accepted open:
+
+```bash
+uv run trading-bot decide-watchlist --max-candidates 20 --send-discord --json-output data/last_decision_watchlist.json
+```
+
 The decision packet includes account/position/order state, option candidates,
 intraday move, 30-minute moving-average trend context, option quote freshness,
 and recent Alpaca/Benzinga news.
@@ -69,6 +75,7 @@ Test the same decision path without calling OpenAI:
 
 ```bash
 uv run trading-bot decide --symbols QQQ --max-candidates 2 --mock-decision skip
+uv run trading-bot decide-watchlist --symbols AAPL,MSFT --max-candidates 3 --mock-decision skip
 ```
 
 Run unit tests:
@@ -83,7 +90,7 @@ Compile-check the package:
 uv run python -m compileall src tests
 ```
 
-The bot refuses to place orders at this stage. The next milestone is read-only option-chain scanning.
+The bot refuses to place orders at this stage. The next milestone is a read-only Alpaca multi-leg order preview for allocator-selected `open` decisions.
 
 ## First Local Checklist
 

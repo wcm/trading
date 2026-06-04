@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from trading_bot.allocation import build_allocation_summary
 from trading_bot.brokers.alpaca import AlpacaClient, AlpacaCredentialsError
 from trading_bot.config import load_config, load_env_file, resolve_path
 from trading_bot.data.events import build_event_context
@@ -105,6 +106,40 @@ def build_parser() -> argparse.ArgumentParser:
         help="Use a local mock decision instead of calling OpenAI.",
     )
 
+    decide_watchlist = subparsers.add_parser(
+        "decide-watchlist",
+        help="Run independent read-only LLM decisions for each watchlist symbol.",
+    )
+    decide_watchlist.add_argument(
+        "--symbols",
+        help="Comma-separated symbols. Defaults to strategy.watchlist.",
+    )
+    decide_watchlist.add_argument(
+        "--max-candidates",
+        type=int,
+        default=20,
+        help="Maximum candidates to pass to each per-symbol LLM decision.",
+    )
+    decide_watchlist.add_argument(
+        "--option-feed",
+        choices=["indicative", "opra"],
+        help="Override Alpaca option data feed for this decision run.",
+    )
+    decide_watchlist.add_argument(
+        "--send-discord",
+        action="store_true",
+        help="Send one Discord summary for the watchlist decision run.",
+    )
+    decide_watchlist.add_argument(
+        "--json-output",
+        help="Optional path to write the combined watchlist decision artifact JSON.",
+    )
+    decide_watchlist.add_argument(
+        "--mock-decision",
+        choices=["skip", "disable_trading"],
+        help="Use local mock decisions instead of calling OpenAI.",
+    )
+
     return parser
 
 
@@ -122,6 +157,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_option_scan(args)
     if args.command == "decide":
         return run_decision(args)
+    if args.command == "decide-watchlist":
+        return run_watchlist_decisions(args)
 
     parser.error(f"Unknown command: {args.command}")
     return 2
@@ -264,71 +301,25 @@ def run_decision(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        account = alpaca.get_account()
-        clock = alpaca.get_clock()
-        positions = alpaca.get_positions()
-        open_orders = alpaca.get_orders(status="open")
-        market_context = build_market_context(config=config, alpaca=alpaca, symbols=symbols)
-        event_context = build_event_context(config=config, symbols=symbols)
-        news_context = build_news_context(config=config, alpaca=alpaca, symbols=symbols)
-        scan_result = scan_put_credit_spreads(
+        artifact, scan_result = _build_decision_artifact(
             config=config,
+            db_path=db_path,
             alpaca=alpaca,
             symbols=symbols,
             max_candidates=args.max_candidates,
             option_feed=args.option_feed,
+            mock_decision=args.mock_decision,
         )
-    except Exception as exc:  # noqa: BLE001 - report broker/API errors cleanly in CLI
-        logger.exception("Decision data collection failed: %s", exc)
-        return 1
-
-    record_option_scan(db_path, mode=config.mode, scan_result=scan_result)
-    packet = build_decision_packet(
-        config=config,
-        account=account,
-        clock=clock,
-        positions=positions,
-        open_orders=open_orders,
-        scan_result=scan_result,
-        market_context=market_context,
-        event_context=event_context,
-        news_context=news_context,
-    )
-    packet_dict = packet.to_dict()
-
-    try:
-        decision, raw_response, model = _get_llm_or_mock_decision(args, config, packet_dict)
     except OpenAIClientError as exc:
         logger.error("%s", exc)
         return 1
+    except Exception as exc:  # noqa: BLE001 - report broker/API errors cleanly in CLI
+        logger.exception("Decision run failed: %s", exc)
+        return 1
 
-    validator_errors = validate_decision_payload(
-        decision,
-        candidate_ids=packet_candidate_ids(scan_result),
-        candidates_by_id=candidate_dicts_by_id(scan_result),
-        allowed_symbols=set(symbols),
-        open_position_symbols={str(position.get("symbol")) for position in positions if position.get("symbol")},
-        market_context_by_symbol=packet_dict["market_context"]["symbols"],
-        event_context_by_symbol=packet_dict["event_context"]["symbols"],
-        max_loss_per_trade=config.get("risk", "max_loss_per_trade"),
-        max_option_quote_age_seconds=int(
-            config.get("market_filters", "max_option_quote_age_minutes", default=30)
-        )
-        * 60,
-    )
-    decision_id = record_llm_decision(
-        db_path,
-        created_at=datetime.now(UTC).isoformat(),
-        mode=config.mode,
-        provider="mock" if args.mock_decision else "openai",
-        model=model,
-        prompt_version=str(config.get("decision_engine", "prompt_version", default="put_credit_spread_v1")),
-        packet=packet_dict,
-        response=decision,
-        raw_response=raw_response,
-        validator_errors=validator_errors,
-    )
-
+    decision_id = artifact["decision_id"]
+    validator_errors = artifact["validator_errors"]
+    decision = artifact["decision"]
     if validator_errors:
         logger.warning("Decision %s rejected by validator: %s", decision_id, "; ".join(validator_errors))
     else:
@@ -343,14 +334,6 @@ def run_decision(args: argparse.Namespace) -> int:
         decision.get("decision_reason"),
     )
 
-    artifact = {
-        "decision_id": decision_id,
-        "accepted": not validator_errors,
-        "validator_errors": validator_errors,
-        "decision": decision,
-        "packet": packet_dict,
-        "raw_response": raw_response,
-    }
     if args.json_output:
         output_path = resolve_path(args.json_output)
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -363,6 +346,92 @@ def run_decision(args: argparse.Namespace) -> int:
             return 1
 
     return 0
+
+
+def run_watchlist_decisions(args: argparse.Namespace) -> int:
+    config, logger, db_path, kill_switch, notifier = bootstrap(args)
+    logger.info("Starting independent read-only watchlist decision run")
+    if kill_switch.is_active():
+        logger.info("Kill switch is active; continuing because decide-watchlist is read-only")
+
+    try:
+        alpaca = AlpacaClient.from_config(config)
+    except AlpacaCredentialsError as exc:
+        logger.error("%s", exc)
+        return 1
+
+    symbols = _watchlist_symbols_from_args_or_config(args, config)
+    if not symbols:
+        logger.error("No symbols configured for watchlist decision run")
+        return 1
+
+    per_symbol: list[dict[str, Any]] = []
+    decision_artifacts: list[dict[str, Any]] = []
+    for symbol in symbols:
+        logger.info("Running independent decision for %s", symbol)
+        try:
+            artifact, scan_result = _build_decision_artifact(
+                config=config,
+                db_path=db_path,
+                alpaca=alpaca,
+                symbols=[symbol],
+                max_candidates=args.max_candidates,
+                option_feed=args.option_feed,
+                mock_decision=args.mock_decision,
+            )
+        except OpenAIClientError as exc:
+            logger.error("Decision failed for %s: %s", symbol, exc)
+            per_symbol.append({"symbol": symbol, "error": str(exc), "accepted": False})
+            continue
+        except Exception as exc:  # noqa: BLE001 - preserve per-symbol progress
+            logger.exception("Decision failed for %s: %s", symbol, exc)
+            per_symbol.append({"symbol": symbol, "error": str(exc), "accepted": False})
+            continue
+
+        decision = artifact["decision"]
+        validator_errors = artifact["validator_errors"]
+        logger.info(
+            "Symbol %s decision action=%s accepted=%s candidate_id=%s confidence=%s candidates=%s",
+            symbol,
+            decision.get("action"),
+            artifact["accepted"],
+            decision.get("candidate_id"),
+            decision.get("confidence"),
+            len(scan_result.candidates),
+        )
+        decision_artifacts.append(artifact)
+        per_symbol.append(_compact_watchlist_artifact(symbol, artifact))
+
+    successful_decisions = [item for item in per_symbol if item.get("decision")]
+    allocation = build_allocation_summary(config, decision_artifacts)
+    combined_artifact = {
+        "generated_at": datetime.now(UTC).isoformat(),
+        "mode": config.mode,
+        "symbols": symbols,
+        "per_symbol": per_symbol,
+        "allocation": allocation,
+    }
+
+    logger.info(
+        "Watchlist decision complete: symbols=%s successful=%s accepted_opens=%s selected=%s",
+        len(symbols),
+        len(successful_decisions),
+        allocation["accepted_open_count"],
+        (allocation["selected_open"] or {}).get("candidate_id"),
+    )
+
+    if args.json_output:
+        output_path = resolve_path(args.json_output)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(json.dumps(combined_artifact, indent=2, sort_keys=True), encoding="utf-8")
+        logger.info("Wrote watchlist decision JSON to %s", output_path)
+
+    if args.send_discord:
+        discord_ok = _send_watchlist_decision_summary(notifier, combined_artifact, logger)
+        if not discord_ok:
+            return 1
+
+    return 0 if successful_decisions else 1
 
 
 def _maybe_send_discord(
@@ -435,6 +504,14 @@ def _symbols_from_args_or_config(args: argparse.Namespace, config) -> list[str]:
     return [str(symbol).strip().upper() for symbol in raw_symbols if str(symbol).strip()]
 
 
+def _watchlist_symbols_from_args_or_config(args: argparse.Namespace, config) -> list[str]:
+    if args.symbols:
+        raw_symbols = args.symbols.split(",")
+    else:
+        raw_symbols = config.get("strategy", "watchlist", default=[])
+    return [str(symbol).strip().upper() for symbol in raw_symbols if str(symbol).strip()]
+
+
 def _send_scan_summary(notifier: DiscordNotifier, scan_result, logger: logging.Logger) -> bool:
     top_lines = [
         f"- {candidate.underlying_symbol} {candidate.short_strike}/{candidate.long_strike}P "
@@ -463,12 +540,12 @@ def _send_scan_summary(notifier: DiscordNotifier, scan_result, logger: logging.L
 
 
 def _get_llm_or_mock_decision(
-    args: argparse.Namespace,
+    mock_decision: str | None,
     config,
     packet_dict: dict[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any], str]:
-    if args.mock_decision:
-        decision = _mock_decision(args.mock_decision)
+    if mock_decision:
+        decision = _mock_decision(mock_decision)
         return decision, {"mock": True, "decision": decision}, "mock"
 
     prompt_version = str(config.get("decision_engine", "prompt_version", default="put_credit_spread_v1"))
@@ -479,6 +556,84 @@ def _get_llm_or_mock_decision(
         decision_packet=packet_dict,
     )
     return decision, raw_response, client.model
+
+
+def _build_decision_artifact(
+    *,
+    config,
+    db_path: Path,
+    alpaca: AlpacaClient,
+    symbols: list[str],
+    max_candidates: int,
+    option_feed: str | None,
+    mock_decision: str | None,
+) -> tuple[dict[str, Any], Any]:
+    account = alpaca.get_account()
+    clock = alpaca.get_clock()
+    positions = alpaca.get_positions()
+    open_orders = alpaca.get_orders(status="open")
+    market_context = build_market_context(config=config, alpaca=alpaca, symbols=symbols)
+    event_context = build_event_context(config=config, symbols=symbols)
+    news_context = build_news_context(config=config, alpaca=alpaca, symbols=symbols)
+    scan_result = scan_put_credit_spreads(
+        config=config,
+        alpaca=alpaca,
+        symbols=symbols,
+        max_candidates=max_candidates,
+        option_feed=option_feed,
+    )
+
+    record_option_scan(db_path, mode=config.mode, scan_result=scan_result)
+    packet = build_decision_packet(
+        config=config,
+        account=account,
+        clock=clock,
+        positions=positions,
+        open_orders=open_orders,
+        scan_result=scan_result,
+        market_context=market_context,
+        event_context=event_context,
+        news_context=news_context,
+    )
+    packet_dict = packet.to_dict()
+    decision, raw_response, model = _get_llm_or_mock_decision(mock_decision, config, packet_dict)
+    validator_errors = validate_decision_payload(
+        decision,
+        candidate_ids=packet_candidate_ids(scan_result),
+        candidates_by_id=candidate_dicts_by_id(scan_result),
+        allowed_symbols=set(symbols),
+        open_position_symbols={str(position.get("symbol")) for position in positions if position.get("symbol")},
+        market_context_by_symbol=packet_dict["market_context"]["symbols"],
+        event_context_by_symbol=packet_dict["event_context"]["symbols"],
+        max_loss_per_trade=config.get("risk", "max_loss_per_trade"),
+        max_option_quote_age_seconds=int(
+            config.get("market_filters", "max_option_quote_age_minutes", default=30)
+        )
+        * 60,
+    )
+    decision_id = record_llm_decision(
+        db_path,
+        created_at=datetime.now(UTC).isoformat(),
+        mode=config.mode,
+        provider="mock" if mock_decision else "openai",
+        model=model,
+        prompt_version=str(config.get("decision_engine", "prompt_version", default="put_credit_spread_v1")),
+        packet=packet_dict,
+        response=decision,
+        raw_response=raw_response,
+        validator_errors=validator_errors,
+    )
+    return (
+        {
+            "decision_id": decision_id,
+            "accepted": not validator_errors,
+            "validator_errors": validator_errors,
+            "decision": decision,
+            "packet": packet_dict,
+            "raw_response": raw_response,
+        },
+        scan_result,
+    )
 
 
 def _load_prompt_text(prompt_version: str) -> str:
@@ -545,6 +700,74 @@ def _send_decision_summary(
         return True
 
     logger.error("Discord decision summary failed: %s", result.error)
+    return False
+
+
+def _compact_watchlist_artifact(symbol: str, artifact: dict[str, Any]) -> dict[str, Any]:
+    decision = artifact["decision"]
+    packet = artifact["packet"]
+    selected_candidate = _selected_candidate_from_packet(packet, decision.get("candidate_id"))
+    return {
+        "symbol": symbol,
+        "decision_id": artifact["decision_id"],
+        "accepted": artifact["accepted"],
+        "validator_errors": artifact["validator_errors"],
+        "decision": decision,
+        "selected_candidate": selected_candidate,
+        "candidate_count": len(packet.get("option_scan", {}).get("candidates", [])),
+        "market_context": packet.get("market_context", {}).get("symbols", {}).get(symbol),
+        "event_context": packet.get("event_context", {}).get("symbols", {}).get(symbol),
+    }
+
+
+def _selected_candidate_from_packet(packet: dict[str, Any], candidate_id: Any) -> dict[str, Any] | None:
+    if not candidate_id:
+        return None
+    candidates = packet.get("option_scan", {}).get("candidates", [])
+    if not isinstance(candidates, list):
+        return None
+    for candidate in candidates:
+        if isinstance(candidate, dict) and candidate.get("candidate_id") == candidate_id:
+            return candidate
+    return None
+
+
+def _send_watchlist_decision_summary(
+    notifier: DiscordNotifier,
+    artifact: dict[str, Any],
+    logger: logging.Logger,
+) -> bool:
+    allocation = artifact["allocation"]
+    selected = allocation.get("selected_open")
+    selected_line = (
+        f"{selected['symbol']} {selected['candidate_id']} limit {selected['limit_price']} "
+        f"max_loss {selected['max_loss']}"
+        if selected
+        else "none"
+    )
+    symbol_lines = []
+    for item in artifact["per_symbol"]:
+        decision = item.get("decision") or {}
+        action = decision.get("action", "error")
+        reason = item.get("error") or decision.get("decision_reason", "")
+        symbol_lines.append(
+            f"- {item.get('symbol')}: {action} candidate={decision.get('candidate_id')} "
+            f"confidence={decision.get('confidence')} reason={str(reason)[:160]}"
+        )
+
+    content = (
+        "Read-only watchlist decision complete\n"
+        f"Symbols: {', '.join(artifact['symbols'])}\n"
+        f"Accepted opens: {allocation['accepted_open_count']}\n"
+        f"Selected open: {selected_line}\n"
+        + "\n".join(symbol_lines[:12])
+    )
+    result = notifier.send(content)
+    if result.ok:
+        logger.info("Discord watchlist decision summary sent")
+        return True
+
+    logger.error("Discord watchlist decision summary failed: %s", result.error)
     return False
 
 
