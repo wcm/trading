@@ -107,6 +107,78 @@ def build_put_credit_spread_order_preview(
     }
 
 
+def build_put_credit_spread_close_preview(
+    *,
+    config: Any,
+    spread: dict[str, Any],
+    client_order_id: str,
+) -> dict[str, Any]:
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    quantity = spread.get("quantity")
+    if not isinstance(quantity, int) or quantity <= 0:
+        errors.append("Close preview requires a positive integer spread quantity")
+        quantity = 0
+
+    limit_price = _decimal_or_none(spread.get("close_limit_price"))
+    if limit_price is None:
+        errors.append("Close preview requires a decimal close_limit_price")
+    elif limit_price < 0:
+        errors.append("Close debit limit_price must be positive or zero")
+
+    short_symbol = spread.get("short_put_symbol")
+    long_symbol = spread.get("long_put_symbol")
+    if not short_symbol or not long_symbol:
+        errors.append("Spread must include short_put_symbol and long_put_symbol")
+
+    order_type = str(config.get("execution", "order_type", default="limit"))
+    if order_type != "limit":
+        errors.append("Only limit MLeg close previews are supported")
+    if bool(config.get("execution", "no_market_orders", default=True)) and order_type == "market":
+        errors.append("Market orders are disabled")
+
+    payload = {
+        "order_class": "mleg",
+        "qty": str(quantity),
+        "type": "limit",
+        "limit_price": _fmt_decimal(limit_price) if limit_price is not None else None,
+        "time_in_force": "day",
+        "client_order_id": client_order_id,
+        "legs": [
+            {
+                "symbol": short_symbol,
+                "ratio_qty": "1",
+                "side": "buy",
+                "position_intent": "buy_to_close",
+            },
+            {
+                "symbol": long_symbol,
+                "ratio_qty": "1",
+                "side": "sell",
+                "position_intent": "sell_to_close",
+            },
+        ],
+    }
+
+    if not bool(config.get("alpaca", "require_client_order_id", default=True)):
+        payload.pop("client_order_id", None)
+        warnings.append("client_order_id omitted because config does not require it")
+
+    return {
+        "kind": "alpaca_mleg_close_preview",
+        "submit_disabled": True,
+        "submit_endpoint": "/v2/orders",
+        "strategy": "put_credit_spread",
+        "spread_id": spread.get("spread_id"),
+        "symbol": spread.get("underlying_symbol"),
+        "payload": payload,
+        "estimated_close_debit": spread.get("estimated_close_debit"),
+        "errors": errors,
+        "warnings": warnings,
+    }
+
+
 def _decimal_or_none(value: Any) -> Decimal | None:
     if value is None:
         return None

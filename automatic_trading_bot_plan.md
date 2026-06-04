@@ -1073,17 +1073,17 @@ Ops:
 
 ## 13. Immediate Next Step
 
-Add a position monitor and exit planner for paper positions.
+Add a unified `run-cycle` command that monitors positions before considering new opens.
 
 Recommended next implementation order:
 
-1. Add read-only position classification for open option legs.
-2. Reconstruct known put credit spreads from Alpaca positions.
-3. Add mark-to-market spread value and P&L context.
-4. Ask the LLM for `hold` or `close` decisions per open spread.
-5. Keep close-order submission disabled until the close preview path is implemented and tested.
+1. Run `monitor-positions` first inside the cycle.
+2. If any spread has `close_recommended=true`, send alert/preview and skip new opens for that cycle.
+3. If no urgent close exists, run independent watchlist decisions.
+4. If an open is selected, use the existing guarded paper execution path.
+5. Add a process lock so only one cycle can run at once.
 
-The next milestone is not live trading. The next milestone is "the bot can monitor paper positions and produce read-only close previews."
+The next milestone is not live trading. The next milestone is "one local bot loop can run monitor-before-open safely."
 
 ## 14. Execution Progress
 
@@ -1143,6 +1143,11 @@ Completed:
 - Added final paper execution gate checks for mode, config flag, kill switch, Discord config, preview errors, MLeg limit payload, duplicate open orders, max open positions, and max open risk.
 - Added SQLite `execution_attempts` logging for blocked, broker-error, and submitted attempts.
 - Added Discord execution status for watchlist decision summaries.
+- Added read-only `monitor-positions` command for existing option positions.
+- Added OCC option symbol parsing and put credit spread reconstruction from Alpaca positions.
+- Added quote-based close debit, estimated spread P&L, and hard exit flags.
+- Added read-only close MLeg previews: buy short put to close, sell long put to close.
+- Added Discord position monitor summary support.
 - Added unit tests for config loading and put credit spread candidate construction.
 - Added unit tests for LLM decision packet construction and validator rejection paths.
 - Added unit test for stale market data blocking `market_trend_ok`.
@@ -1150,6 +1155,7 @@ Completed:
 - Added unit tests for deterministic allocator selection.
 - Added unit tests for put credit spread MLeg order preview payloads.
 - Added unit tests for the disabled-by-default paper execution gate and execution-attempt logging.
+- Added unit tests for option symbol parsing, position monitoring, P&L marking, profit-target flags, and close previews.
 - Updated paper-mode option data feed to `indicative` because Alpaca returned `OPRA agreement is not signed`.
 - Kept `opra` as the required live-mode target feed before real options execution.
 
@@ -1171,6 +1177,7 @@ Verified:
 - `uv run trading-bot decide-watchlist --symbols AAPL,MSFT --max-candidates 10 --json-output data/last_decide_watchlist_openai_smoke.json`
 - `uv run trading-bot decide-watchlist --max-candidates 20 --send-discord --json-output data/last_decision_watchlist_with_preview.json`
 - `uv run trading-bot decide-watchlist --symbols AAPL --max-candidates 1 --mock-decision skip --submit-paper --json-output data/last_submit_paper_blocked_mock.json`
+- `uv run trading-bot monitor-positions --send-discord --json-output data/last_position_monitor.json`
 - `uv run python -m unittest discover -s tests`
 - `uv run python -m compileall src tests`
 - `git diff --check`
@@ -1191,6 +1198,7 @@ Current known state:
 - The allocator currently ranks accepted opens by confidence, then reward/risk, then max profit.
 - Read-only Alpaca MLeg order previews are generated for validator-accepted `open` decisions.
 - Paper order submission code exists but is blocked by default unless both `--submit-paper` and `execution.enable_paper_orders: true` are present.
+- Read-only position monitoring works and generates close previews for reconstructed put credit spreads.
 - External earnings/calendar provider integration is still not implemented.
 - The latest real LLM decision accepted by the validator is an `open` recommendation for a read-only META put credit spread: `META-2026-06-12-597.50P-592.50P`, quantity 1, credit limit `-1.02`, max loss USD 398.
 - OPRA is not currently enabled because the OPRA agreement is not signed.

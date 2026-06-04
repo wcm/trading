@@ -77,6 +77,12 @@ uv run trading-bot decide-watchlist --max-candidates 20 --submit-paper --send-di
 
 The command above still refuses to submit unless `execution.enable_paper_orders: true` is set in `config/settings.yaml`.
 
+Monitor existing paper option positions and generate read-only close previews:
+
+```bash
+uv run trading-bot monitor-positions --send-discord --json-output data/last_position_monitor.json
+```
+
 The decision packet includes account/position/order state, option candidates,
 intraday move, 30-minute moving-average trend context, option quote freshness,
 and recent Alpaca/Benzinga news.

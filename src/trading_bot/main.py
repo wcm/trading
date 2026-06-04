@@ -19,6 +19,7 @@ from trading_bot.llm.decision import build_decision_packet, candidate_dicts_by_i
 from trading_bot.llm.openai_client import OpenAIClient, OpenAIClientError
 from trading_bot.llm.schemas import validate_decision_payload
 from trading_bot.logging_config import configure_logging
+from trading_bot.monitoring.positions import monitor_put_credit_spreads
 from trading_bot.notifications.discord import DiscordNotifier
 from trading_bot.risk.kill_switch import KillSwitch
 from trading_bot.storage.db import (
@@ -153,6 +154,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="Request paper order submission for the allocator-selected open. Requires execution.enable_paper_orders=true.",
     )
 
+    monitor = subparsers.add_parser(
+        "monitor-positions",
+        help="Run a read-only monitor for existing put credit spread positions.",
+    )
+    monitor.add_argument(
+        "--option-feed",
+        choices=["indicative", "opra"],
+        help="Override Alpaca option data feed for this monitor run.",
+    )
+    monitor.add_argument(
+        "--send-discord",
+        action="store_true",
+        help="Send a Discord position monitor summary.",
+    )
+    monitor.add_argument(
+        "--json-output",
+        help="Optional path to write the position monitor artifact JSON.",
+    )
+
     return parser
 
 
@@ -172,6 +192,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_decision(args)
     if args.command == "decide-watchlist":
         return run_watchlist_decisions(args)
+    if args.command == "monitor-positions":
+        return run_position_monitor(args)
 
     parser.error(f"Unknown command: {args.command}")
     return 2
@@ -495,6 +517,59 @@ def run_watchlist_decisions(args: argparse.Namespace) -> int:
             return 1
 
     return 0 if successful_decisions else 1
+
+
+def run_position_monitor(args: argparse.Namespace) -> int:
+    config, logger, _db_path, kill_switch, notifier = bootstrap(args)
+    logger.info("Starting read-only position monitor")
+    if kill_switch.is_active():
+        logger.info("Kill switch is active; continuing because monitor-positions is read-only")
+
+    try:
+        alpaca = AlpacaClient.from_config(config)
+    except AlpacaCredentialsError as exc:
+        logger.error("%s", exc)
+        return 1
+
+    try:
+        result = monitor_put_credit_spreads(
+            config=config,
+            alpaca=alpaca,
+            option_feed=args.option_feed,
+        )
+    except Exception as exc:  # noqa: BLE001 - report broker/API errors cleanly in CLI
+        logger.exception("Position monitor failed: %s", exc)
+        return 1
+
+    logger.info(
+        "Position monitor complete: option_positions=%s spreads=%s unpaired_legs=%s",
+        result.option_position_count,
+        result.spread_count,
+        len(result.unpaired_legs),
+    )
+    for spread in result.spreads:
+        logger.info(
+            "Spread %s close_recommended=%s close_debit=%s pnl=%s flags=%s",
+            spread.get("spread_id"),
+            spread.get("close_recommended"),
+            spread.get("close_debit"),
+            spread.get("estimated_unrealized_pnl"),
+            ",".join(flag for flag, active in spread.get("exit_flags", {}).items() if active) or "-",
+        )
+
+    artifact = result.to_dict()
+    if args.json_output:
+        output_path = resolve_path(args.json_output)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(json.dumps(artifact, indent=2, sort_keys=True), encoding="utf-8")
+        logger.info("Wrote position monitor JSON to %s", output_path)
+
+    if args.send_discord:
+        discord_ok = _send_position_monitor_summary(notifier, artifact, logger)
+        if not discord_ok:
+            return 1
+
+    return 0
 
 
 def _maybe_send_discord(
@@ -887,6 +962,40 @@ def _execution_status(execution_attempt: dict[str, Any] | None) -> str:
     if broker_error:
         return f"{status}, submitted={submitted}, broker_error={str(broker_error)[:120]}"
     return f"{status}, submitted={submitted}"
+
+
+def _send_position_monitor_summary(
+    notifier: DiscordNotifier,
+    artifact: dict[str, Any],
+    logger: logging.Logger,
+) -> bool:
+    spread_lines = []
+    for spread in artifact.get("spreads", [])[:10]:
+        active_flags = [
+            flag for flag, active in (spread.get("exit_flags") or {}).items() if active
+        ]
+        spread_lines.append(
+            f"- {spread.get('spread_id')}: close={spread.get('close_recommended')} "
+            f"debit={spread.get('close_debit')} pnl={spread.get('estimated_unrealized_pnl')} "
+            f"flags={','.join(active_flags) or '-'}"
+        )
+    if not spread_lines:
+        spread_lines = ["- No put credit spreads detected."]
+
+    content = (
+        "Read-only position monitor complete\n"
+        f"Option positions: {artifact.get('option_position_count')}\n"
+        f"Spreads: {artifact.get('spread_count')}\n"
+        f"Unpaired legs: {len(artifact.get('unpaired_legs', []))}\n"
+        + "\n".join(spread_lines)
+    )
+    result = notifier.send(content)
+    if result.ok:
+        logger.info("Discord position monitor summary sent")
+        return True
+
+    logger.error("Discord position monitor summary failed: %s", result.error)
+    return False
 
 
 if __name__ == "__main__":

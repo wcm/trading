@@ -3,7 +3,10 @@ from __future__ import annotations
 import unittest
 
 from trading_bot.config import load_config
-from trading_bot.execution.orders import build_put_credit_spread_order_preview
+from trading_bot.execution.orders import (
+    build_put_credit_spread_close_preview,
+    build_put_credit_spread_order_preview,
+)
 
 
 def valid_open_decision() -> dict:
@@ -84,6 +87,47 @@ class OrderPreviewTests(unittest.TestCase):
         )
 
         self.assertTrue(any("must be negative" in error for error in preview["errors"]))
+
+    def test_builds_close_preview_for_put_credit_spread(self) -> None:
+        config = load_config("config/settings.yaml")
+        preview = build_put_credit_spread_close_preview(
+            config=config,
+            spread={
+                "spread_id": "AAPL-2026-06-12-305.00P-300.00P",
+                "underlying_symbol": "AAPL",
+                "short_put_symbol": "AAPL260612P00305000",
+                "long_put_symbol": "AAPL260612P00300000",
+                "quantity": 1,
+                "close_limit_price": "0.80",
+                "estimated_close_debit": "80.00",
+            },
+            client_order_id="close-preview-aapl-test-001",
+        )
+
+        self.assertEqual(preview["errors"], [])
+        self.assertTrue(preview["submit_disabled"])
+        self.assertEqual(preview["estimated_close_debit"], "80.00")
+
+        payload = preview["payload"]
+        self.assertEqual(payload["order_class"], "mleg")
+        self.assertEqual(payload["limit_price"], "0.8")
+        self.assertEqual(
+            payload["legs"],
+            [
+                {
+                    "symbol": "AAPL260612P00305000",
+                    "ratio_qty": "1",
+                    "side": "buy",
+                    "position_intent": "buy_to_close",
+                },
+                {
+                    "symbol": "AAPL260612P00300000",
+                    "ratio_qty": "1",
+                    "side": "sell",
+                    "position_intent": "sell_to_close",
+                },
+            ],
+        )
 
 
 if __name__ == "__main__":
