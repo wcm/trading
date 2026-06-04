@@ -1073,15 +1073,15 @@ Ops:
 
 ## 13. Immediate Next Step
 
-Add daily lifecycle and cost summaries.
+Next milestone: daily lifecycle and cost summaries.
 
-Recommended next implementation order:
+Build this next:
 
-1. Summarize order lifecycle changes by day.
-2. Summarize LLM token usage and estimated spend by day.
-3. Send one Discord daily summary after market close.
-4. Add a scheduler option for the daily summary.
-5. Then run one tiny full paper lifecycle: open, monitor, close, verify P&L.
+- Summarize daily order lifecycle changes from SQLite.
+- Summarize daily LLM usage and estimated spend.
+- Send one after-market Discord summary.
+- Add a scheduler option for the daily summary.
+- Then run one tiny full paper lifecycle: open, monitor, close, verify P&L.
 
 The next milestone is not live trading. The next milestone is "the bot can explain what happened today without reading raw logs."
 
@@ -1089,169 +1089,53 @@ The next milestone is not live trading. The next milestone is "the bot can expla
 
 Last updated: 2026-06-04
 
-Completed:
+Current state:
 
-- Initialized Git repository and pushed it to `https://github.com/wcm/trading.git`.
-- Created the working plan file: `automatic_trading_bot_plan.md`.
-- Updated the plan to use Alpaca only for v1.
-- Updated the plan to start with paper trading, not live trading.
-- Updated the plan to run locally first, then cloud paper, then cloud live.
-- Created local Python project scaffold with `uv`.
-- Added `config/settings.yaml` with paper-mode defaults.
-- Added `config/secrets.example.env` and a local ignored `.env`.
-- Added `.gitignore` so secrets, logs, SQLite DBs, scan JSON, and virtualenv files are not committed.
-- Added local boot/smoke CLI: `uv run trading-bot smoke`.
-- Added Discord webhook notifier.
-- Added Alpaca paper read-only client for account, clock, positions, orders, stock bars, option contracts, and option snapshots.
-- Added kill switch detection.
-- Added SQLite initialization and bot-run logging.
-- Added read-only put credit spread scanner: `uv run trading-bot scan-options`.
-- Added conservative candidate math using short-leg bid minus long-leg ask.
-- Added scan-run and scan-candidate SQLite tables.
-- Added Discord scan summary support.
-- Added read-only LLM decision command: `uv run trading-bot decide`.
-- Added independent per-symbol watchlist decision command: `uv run trading-bot decide-watchlist`.
-- Added OpenAI Responses API integration with strict Structured Outputs JSON schema.
-- Added decision packet builder with account, clock, positions, orders, scan candidates, risk limits, and placeholder news context.
-- Added LLM decision persistence with packet, prompt version, response, raw response, validator errors, and accepted/rejected flag.
-- Added LLM decision Discord summary support.
-- Added mock decision mode for local validation without calling OpenAI.
-- Added validator checks for unknown candidates, unsupported actions, positive credit prices, quantity limits, and unsupported symbols.
-- Added Alpaca historical stock bar retrieval.
-- Added intraday move calculation.
-- Added 30-minute 20-period moving average market-trend context.
-- Added market-data freshness checks.
-- Added Alpaca recent-news retrieval.
-- Added recent-news context to the LLM decision packet.
-- Added option quote timestamps and quote-age data to spread candidates.
-- Added hard validator checks for failed market trend, stale market bars, stale/unavailable option quotes, symbol mismatch, and max-loss limit.
-- Added candidate-level liquidity fields: open interest, bid/ask spread, spread percent of mid, and `liquidity_ok`.
-- Added hard validator checks for candidate liquidity, earnings/event context, high-risk news, negative news, and open-decision risk checklist values.
-- Added manual paper-mode earnings/event context to the LLM packet.
-- Added manual next earnings dates for AMD and META for paper testing.
-- Raised paper `risk.max_loss_per_trade` from USD 500 to USD 1,000 and `risk.max_open_risk` from USD 1,500 to USD 5,000 to match the aggressive paper experiment with a capped total exposure budget.
-- Relaxed `liquidity.max_leg_spread_absolute` from USD 0.20 to USD 0.50 while keeping the 15% spread-of-mid filter.
-- Added deterministic allocator ranking for accepted per-symbol `open` decisions.
-- Added combined watchlist decision JSON artifact with per-symbol decisions and allocator-selected open.
-- Added one-message Discord summary support for watchlist decision runs.
-- Added read-only Alpaca MLeg order preview payloads for validator-accepted `open` decisions.
-- Added allocator-selected `selected_order_preview` to watchlist decision artifacts.
-- Added Discord preview status for single-symbol and watchlist decision summaries.
-- Added `execution.enable_paper_orders: false` as the default paper execution lock.
-- Added `--submit-paper` to `decide-watchlist` as the CLI execution-intent lock.
-- Added Alpaca paper order submission method, gated behind final execution checks.
-- Added final paper execution gate checks for mode, config flag, kill switch, Discord config, preview errors, MLeg limit payload, duplicate open orders, max open positions, and max open risk.
-- Added SQLite `execution_attempts` logging for blocked, broker-error, and submitted attempts.
-- Added Discord execution status for watchlist decision summaries.
-- Added read-only `monitor-positions` command for existing option positions.
-- Added OCC option symbol parsing and put credit spread reconstruction from Alpaca positions.
-- Added quote-based close debit, estimated spread P&L, and hard exit flags.
-- Added read-only close MLeg previews: buy short put to close, sell long put to close.
-- Added Discord position monitor summary support.
-- Added unified `run-cycle` command that monitors positions before considering new opens.
-- Added run-cycle behavior that skips new open decisions when any spread has `close_recommended=true`.
-- Added run-cycle reuse of independent watchlist decisions, allocator selection, and the existing guarded paper execution path.
-- Added a non-overlap process lock for `run-cycle`.
-- Added explicit `runtime.cycle_lock_path` config.
-- Added one-message Discord summary support for full run cycles.
-- Added full per-symbol Discord decision detail messages for watchlist and run-cycle notifications.
-- Added local `schedule-local` command for supervised repeated `run-cycle` checks during Alpaca market hours.
-- Added scheduler heartbeat and error Discord messages.
-- Added configurable scheduler interval and heartbeat interval, defaulting to 3 minutes and 60 minutes.
-- Added timestamped scheduled run-cycle JSON artifacts via `--json-output-dir`.
-- Added configurable OpenAI `decision_engine.reasoning_effort`, defaulting to `medium`.
-- Added guarded paper close execution path for monitor and run-cycle close recommendations.
-- Added `execution.enable_paper_close_orders: false` as the default paper close execution lock.
-- Added `--submit-paper-close` to `monitor-positions`, `run-cycle`, and `schedule-local`.
-- Added final paper close execution gate checks for mode, config flag, kill switch, Discord config, close preview errors, MLeg limit payload, duplicate leg orders, and current spread-leg positions.
-- Added SQLite `execution_attempts` logging for blocked, broker-error, and submitted close attempts.
-- Added `poll-orders` command for Alpaca order lifecycle polling.
-- Added SQLite `order_status_events` logging that records only new order status or filled-quantity changes.
-- Added Discord order lifecycle notifications for new status/fill changes, with long updates split instead of truncating changed orders.
-- Added scheduler order polling after each scheduler check, with `--skip-order-poll` and `--order-poll-limit`.
-- Added unit tests for config loading and put credit spread candidate construction.
-- Added unit tests for LLM decision packet construction and validator rejection paths.
-- Added unit test for stale market data blocking `market_trend_ok`.
-- Added unit tests for candidate liquidity fields, earnings/event blocking, and high-risk news blocking.
-- Added unit tests for deterministic allocator selection.
-- Added unit tests for put credit spread MLeg order preview payloads.
-- Added unit tests for the disabled-by-default paper execution gate and execution-attempt logging.
-- Added unit tests for option symbol parsing, position monitoring, P&L marking, profit-target flags, and close previews.
-- Added unit tests for run-cycle argument parsing, close-before-open gating, and Discord cycle summaries.
-- Added unit tests for local scheduler parsing/defaults/artifact paths and OpenAI reasoning effort payloads.
-- Added unit tests for the disabled-by-default paper close execution gate.
-- Added unit tests for order status event de-duplication, paper/live event separation, order-poll CLI parsing, and full lifecycle Discord summaries.
-- Updated paper-mode option data feed to `indicative` because Alpaca returned `OPRA agreement is not signed`.
-- Kept `opra` as the required live-mode target feed before real options execution.
-
-Verified:
-
-- `uv run trading-bot smoke`
-- `uv run trading-bot smoke --check-alpaca`
-- `uv run trading-bot scan-options --symbols QQQ --max-candidates 3 --json-output data/last_option_scan.json`
-- `uv run trading-bot scan-options --symbols QQQ --max-candidates 5 --send-discord`
-- `uv run trading-bot decide --symbols QQQ --max-candidates 3 --mock-decision skip --json-output data/last_decision.json`
-- `uv run trading-bot decide --symbols QQQ --max-candidates 2 --json-output data/last_decision_openai.json`
-- `uv run trading-bot decide --symbols QQQ --max-candidates 2 --send-discord`
-- `uv run trading-bot scan-options --symbols AMD --max-candidates 5 --json-output data/last_option_scan_amd.json`
-- `uv run trading-bot decide --symbols AMD --max-candidates 5 --send-discord --json-output data/last_decision_amd.json`
-- `uv run trading-bot scan-options --symbols AMD,QQQ,AAPL,MSFT,NVDA,AMZN,META,GOOGL,TSLA --max-candidates 30 --json-output data/last_option_scan_broad.json`
-- `uv run trading-bot decide --symbols AMD,QQQ,AAPL,MSFT,NVDA,AMZN,META,GOOGL,TSLA --max-candidates 30 --send-discord --json-output data/last_decision_broad.json`
-- `uv run trading-bot decide --symbols META --max-candidates 10 --send-discord --json-output data/last_decision_meta_aggressive.json`
-- `uv run trading-bot decide-watchlist --symbols AAPL,MSFT --max-candidates 3 --mock-decision skip --json-output data/last_decide_watchlist_mock.json`
-- `uv run trading-bot decide-watchlist --symbols AAPL,MSFT --max-candidates 10 --json-output data/last_decide_watchlist_openai_smoke.json`
-- `uv run trading-bot decide-watchlist --max-candidates 20 --send-discord --json-output data/last_decision_watchlist_with_preview.json`
-- `uv run trading-bot decide-watchlist --symbols AAPL --max-candidates 1 --mock-decision skip --send-discord --json-output data/last_decision_watchlist_full_discord.json`
-- `uv run trading-bot decide-watchlist --symbols AAPL --max-candidates 1 --mock-decision skip --submit-paper --json-output data/last_submit_paper_blocked_mock.json`
-- `uv run trading-bot monitor-positions --send-discord --json-output data/last_position_monitor.json`
-- `uv run trading-bot monitor-positions --submit-paper-close --json-output data/last_position_monitor_close_gate.json`
-- `uv run trading-bot poll-orders --status all --limit 25 --json-output data/last_order_poll.json`
-- `uv run trading-bot poll-orders --status all --limit 25 --send-discord --notify-no-changes --json-output data/last_order_poll_discord.json`
-- `uv run trading-bot run-cycle --symbols AAPL,MSFT --max-candidates 1 --mock-decision skip --json-output data/last_run_cycle_mock.json`
-- `uv run trading-bot run-cycle --symbols AAPL,MSFT --max-candidates 1 --mock-decision skip --send-discord --json-output data/last_run_cycle_mock_discord.json`
-- `uv run trading-bot schedule-local --symbols AAPL --max-candidates 1 --mock-decision skip --send-discord --json-output-dir data/scheduler_cycles --once`
-- `uv run trading-bot schedule-local --symbols AAPL --max-candidates 1 --mock-decision skip --json-output-dir data/scheduler_cycles --once`
-- `uv run python -m unittest discover -s tests`
-- `uv run python -m compileall src tests`
-- `git diff --check`
-
-Current known state:
-
-- Alpaca paper account is reachable and active.
-- Alpaca paper account reported USD 100,000 equity and USD 200,000 buying power.
-- Alpaca paper account currently has zero open positions.
-- Read-only QQQ option scanning works with Alpaca's `indicative` option data feed.
-- Read-only OpenAI LLM decisioning works and returns schema-valid decisions.
-- The latest real LLM decision chose `skip` because QQQ failed the 30-minute moving-average market-trend filter.
-- Recent Alpaca/Benzinga news retrieval works and is included in the LLM packet.
-- Quote freshness is included in spread candidates and enforced by the validator for `open` decisions.
-- Candidate liquidity is included in spread candidates and enforced by the validator for `open` decisions.
-- Manual paper-mode earnings/event context is included in the LLM packet and enforced by the validator for `open` decisions.
-- Independent per-symbol watchlist decisions work in mock mode and produce one allocator summary.
-- The allocator currently ranks accepted opens by confidence, then reward/risk, then max profit.
-- Read-only Alpaca MLeg order previews are generated for validator-accepted `open` decisions.
-- Paper order submission code exists but is blocked by default unless both `--submit-paper` and `execution.enable_paper_orders: true` are present.
-- Read-only position monitoring works and generates close previews for reconstructed put credit spreads.
-- `run-cycle` works as the intended local loop: monitor first, close alerts before opens, then watchlist decisions if safe to look for new entries.
-- `schedule-local` works as the local scheduler: it checks Alpaca market hours, sends heartbeat/error notifications, and runs one locked `run-cycle` per interval.
-- GPT-5.5 reasoning effort is configurable and currently defaults to `medium`.
-- Paper close order submission code exists but is blocked by default unless both `--submit-paper-close` and `execution.enable_paper_close_orders: true` are present.
+- Repo is initialized and pushed to `https://github.com/wcm/trading.git`.
+- Mode remains paper trading; no paper or live orders have been submitted by the bot.
+- Alpaca paper connectivity works for account, clock, positions, orders, stock bars, option contracts, option snapshots, and news.
+- Discord notifications work and are required before execution gates can submit orders.
+- SQLite logging is active for bot runs, option scans, LLM decisions, execution attempts, and order status events.
+- The bot can scan put credit spreads, build LLM decision packets, validate decisions, generate MLeg previews, monitor positions, run one local cycle, and run a market-hours scheduler.
+- Paper open and close execution paths exist but are disabled by default behind config and CLI locks.
 - Order lifecycle polling works and currently reports zero recent Alpaca paper orders.
+- Paper option data uses Alpaca `indicative` because OPRA is not signed; live options trading should require OPRA.
+
+Completed milestone groups:
+
+- Project foundation: Python/uv scaffold, config, ignored secrets, logging, kill switch, Discord, SQLite.
+- Alpaca integration: paper broker client for account, market data, options data, news, positions, orders, and MLeg submission payloads.
+- Strategy and data: put credit spread scanner, conservative credit/max-loss math, liquidity checks, trend checks, quote freshness, event/earnings context, and news context.
+- LLM decisioning: OpenAI Responses API, strict JSON schema, prompt versioning, per-symbol watchlist decisions, mock mode, decision persistence, and validator guard rails.
+- Risk and execution gates: max-loss/open-risk checks, symbol/candidate checks, stale-data blocks, default-disabled paper open/close order submission, and execution-attempt logging.
+- Monitoring loop: position reconstruction, close previews, P&L estimates, hard exit flags, monitor-before-open `run-cycle`, non-overlap lock, and local market-hours scheduler.
+- Notifications: Discord summaries for scans, decisions, run cycles, execution attempts, scheduler heartbeat/errors, and order lifecycle changes.
+- Tests: unit coverage for scanning, LLM packets, validation, liquidity/events/news blocks, allocation, order previews, execution gates, position monitoring, run-cycle/scheduler behavior, and order lifecycle polling.
+
+Latest verification:
+
+- `uv run python -m unittest discover -s tests` passed with 44 tests.
+- `uv run python -m compileall src tests` passed.
+- `git diff --check` passed.
+- Live paper checks confirmed Alpaca connectivity, zero open positions, zero recent orders, and Discord notification delivery.
+
+Known gaps:
+
 - External earnings/calendar provider integration is still not implemented.
-- The latest real LLM decision accepted by the validator is an `open` recommendation for a read-only META put credit spread: `META-2026-06-12-597.50P-592.50P`, quantity 1, credit limit `-1.02`, max loss USD 398.
-- OPRA is not currently enabled because the OPRA agreement is not signed.
-- No actual paper or live order has been submitted by the bot yet.
+- Daily lifecycle and LLM cost summaries are not implemented yet.
+- No full paper trade lifecycle has been opened, monitored, closed, and reviewed yet.
+- Cloud deployment is not started.
+- Live trading remains out of scope until paper promotion criteria, Level 3 options approval, and OPRA/live data readiness are satisfied.
 
-Recent commits:
+Recent implementation commits:
 
-- `ec06b6f Add read-only position monitor`
-- `26c41a5 Add unified run cycle`
 - `66e7aa1 Expand Discord decision details`
 - `d7d9202 Add local market-hours scheduler`
 - `a75ee44 Add guarded paper close execution`
+- `dbb9a32 Add order lifecycle polling`
 
 Latest milestone:
 
-- Add order lifecycle polling
-- Notify on new order status/fill changes
-- Poll orders inside the local scheduler
+- Added Alpaca order lifecycle polling.
+- Added Discord notifications for order status/fill changes.
+- Added scheduler-integrated order polling.
