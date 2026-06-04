@@ -180,6 +180,8 @@ def _send_run_cycle_summary(
     notifier: DiscordNotifier,
     artifact: dict[str, Any],
     logger: logging.Logger,
+    *,
+    include_decision_details: bool = True,
 ) -> bool:
     monitor = artifact.get("monitor") or {}
     close_spreads = artifact.get("close_recommended_spreads") or []
@@ -229,7 +231,7 @@ def _send_run_cycle_summary(
         )
 
     messages = ["\n".join(lines)]
-    if not close_spreads:
+    if include_decision_details and not close_spreads:
         messages.extend(_watchlist_decision_detail_messages(watchlist, heading="Run-cycle decision"))
     if _send_discord_messages(notifier, messages, logger, "run-cycle summary"):
         return True

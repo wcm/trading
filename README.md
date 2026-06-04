@@ -174,6 +174,8 @@ uv run trading-bot schedule-local --symbols AAPL --max-candidates 1 --mock-decis
 
 Use `--send-cycle-discord` only when you want every scheduled cycle to also send
 the full run-cycle decision summary.
+Add `--cycle-summary-only` when you want only the compact run-cycle/open-discovery
+summary without per-symbol detail messages.
 The scheduler also polls recent Alpaca order statuses after each check unless
 `--skip-order-poll` is used.
 When positions are open, the scheduler runs monitor-only supervision on the

@@ -175,7 +175,12 @@ def _run_cycle_with_lock(
 
     discord_ok = True
     if args.send_discord:
-        discord_ok = _send_run_cycle_summary(notifier, cycle_artifact, logger)
+        discord_ok = _send_run_cycle_summary(
+            notifier,
+            cycle_artifact,
+            logger,
+            include_decision_details=not bool(getattr(args, "discord_summary_only", False)),
+        )
 
     final_status = cycle_status if discord_ok else "failed"
     record_bot_run(

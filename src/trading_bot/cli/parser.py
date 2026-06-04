@@ -228,6 +228,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Send one Discord summary for the full cycle.",
     )
     cycle.add_argument(
+        "--discord-summary-only",
+        action="store_true",
+        help="Send only the compact cycle Discord summary, without per-symbol detail messages.",
+    )
+    cycle.add_argument(
         "--json-output",
         help="Optional path to write the combined cycle artifact JSON.",
     )
@@ -290,6 +295,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--send-cycle-discord",
         action="store_true",
         help="Also send each run-cycle's detailed Discord summary.",
+    )
+    scheduler.add_argument(
+        "--cycle-summary-only",
+        action="store_true",
+        help="With --send-cycle-discord, send only compact cycle summaries without per-symbol details.",
     )
     scheduler.add_argument(
         "--json-output-dir",

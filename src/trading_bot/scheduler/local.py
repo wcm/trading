@@ -467,6 +467,7 @@ def _scheduler_cycle_args(args: argparse.Namespace, json_output: str | None) -> 
         max_candidates=args.max_candidates,
         option_feed=args.option_feed,
         send_discord=args.send_cycle_discord,
+        discord_summary_only=args.cycle_summary_only,
         json_output=json_output,
         mock_decision=args.mock_decision,
         submit_paper=args.submit_paper,

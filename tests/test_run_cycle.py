@@ -113,6 +113,7 @@ class RunCycleTests(unittest.TestCase):
                 "3",
                 "--mock-decision",
                 "skip",
+                "--discord-summary-only",
                 "--submit-paper",
                 "--submit-paper-close",
             ]
@@ -122,6 +123,7 @@ class RunCycleTests(unittest.TestCase):
         self.assertEqual(args.symbols, "AAPL,MSFT")
         self.assertEqual(args.max_candidates, 3)
         self.assertEqual(args.mock_decision, "skip")
+        self.assertTrue(args.discord_summary_only)
         self.assertTrue(args.submit_paper)
         self.assertTrue(args.submit_paper_close)
 
@@ -139,6 +141,7 @@ class RunCycleTests(unittest.TestCase):
                 "30",
                 "--send-discord",
                 "--send-cycle-discord",
+                "--cycle-summary-only",
                 "--submit-paper-close",
                 "--skip-order-poll",
                 "--order-poll-limit",
@@ -160,6 +163,7 @@ class RunCycleTests(unittest.TestCase):
         self.assertEqual(args.heartbeat_minutes, 30)
         self.assertTrue(args.send_discord)
         self.assertTrue(args.send_cycle_discord)
+        self.assertTrue(args.cycle_summary_only)
         self.assertTrue(args.submit_paper_close)
         self.assertTrue(args.skip_order_poll)
         self.assertEqual(args.order_poll_limit, 25)
@@ -235,8 +239,23 @@ class RunCycleTests(unittest.TestCase):
         self.assertEqual(cycle_args.symbols, "AAPL")
         self.assertEqual(cycle_args.max_candidates, 2)
         self.assertFalse(cycle_args.send_discord)
+        self.assertFalse(cycle_args.discord_summary_only)
         self.assertEqual(cycle_args.json_output, "data/test_cycle.json")
         self.assertFalse(cycle_args.submit_paper_close)
+
+    def test_scheduler_cycle_args_preserve_summary_only(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "schedule-local",
+                "--send-cycle-discord",
+                "--cycle-summary-only",
+            ]
+        )
+
+        cycle_args = _scheduler_cycle_args(args, "data/test_cycle.json")
+
+        self.assertTrue(cycle_args.send_discord)
+        self.assertTrue(cycle_args.discord_summary_only)
 
     def test_watchlist_decision_concurrency_default_is_eight(self) -> None:
         config = load_config("config/settings.yaml")
