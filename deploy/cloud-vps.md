@@ -60,6 +60,15 @@ Restart after pulling code or editing config:
 docker compose up -d --build
 ```
 
+From the local Mac, after committing and pushing changes, the usual shortcut is:
+
+```bash
+deploy/update-cloud.sh
+```
+
+Use `deploy/update-cloud.sh --host root@DROPLET_IP` if the `trading-bot-vps`
+SSH alias is not configured.
+
 Inspect logs:
 
 ```bash

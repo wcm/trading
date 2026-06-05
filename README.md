@@ -1,8 +1,21 @@
 # Trading Bot
 
-Local-first, paper-first options trading bot experiment.
+Cloud-paper, paper-first options trading bot experiment.
 
-The current milestone is one local paper-mode bot cycle:
+Start here:
+
+- [automatic_trading_bot_plan.md](automatic_trading_bot_plan.md): strategy, current state, roadmap, and known gaps.
+- [automatic_trading_bot_runbook.md](automatic_trading_bot_runbook.md): beginner-friendly operations commands, cloud access, deploy workflow, logs, smoke tests, and emergency stop.
+- `deploy/update-cloud.sh`: one-command cloud update after local changes are committed and pushed.
+
+Current status:
+
+- Alpaca paper mode only; live trading is out of scope for now.
+- Normal scheduler runs on the DigitalOcean VPS through Docker Compose.
+- Local scheduler should stay stopped while the cloud scheduler is running.
+- Paper open/close execution is protected by both config locks and CLI flags; the current cloud paper experiment deliberately enables both in paper mode.
+
+The bot cycle:
 
 - load config from `config/settings.yaml`
 - load secrets from `.env`
@@ -13,8 +26,35 @@ The current milestone is one local paper-mode bot cycle:
 - otherwise run independent watchlist decisions
 - optionally send Discord summaries
 
-Paper order submission exists for allocator-selected opens, but it is disabled
-unless both the CLI flag and config lock are enabled.
+Paper order submission exists for allocator-selected opens, but it requires both
+the CLI flag and config lock to be enabled.
+
+## Common Operations
+
+Update the cloud bot after committing and pushing local changes:
+
+```bash
+deploy/update-cloud.sh
+```
+
+Watch cloud logs:
+
+```bash
+ssh trading-bot-vps
+cd /opt/trading
+docker compose logs -f trading-bot
+```
+
+Emergency stop:
+
+```bash
+ssh trading-bot-vps
+cd /opt/trading
+docker compose down
+```
+
+See [automatic_trading_bot_runbook.md](automatic_trading_bot_runbook.md) for the
+full command list.
 
 ## Code Organization
 
