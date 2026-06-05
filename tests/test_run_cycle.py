@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import json
 import logging
+import tempfile
 import unittest
 from datetime import UTC, datetime
+from pathlib import Path
+from unittest.mock import patch
 
 from trading_bot.config import load_config
 from trading_bot.cli.parser import build_parser
@@ -10,6 +14,7 @@ from trading_bot.cycles.run_cycle import (
     _build_run_cycle_artifact,
     _close_recommended_spreads,
     _max_concurrent_symbols,
+    _run_cycle_with_lock,
 )
 from trading_bot.notifications.messages import (
     _send_daily_trading_summary,
@@ -18,6 +23,7 @@ from trading_bot.notifications.messages import (
     _send_run_cycle_summary,
 )
 from trading_bot.scheduler.local import (
+    _scheduler_closed_market_sleep_target,
     _scheduler_cycle_args,
     _scheduler_cycle_json_output,
     _scheduler_daily_summary_due_date,
@@ -29,6 +35,22 @@ from trading_bot.scheduler.local import (
     _scheduler_order_poll_limit,
 )
 from trading_bot.notifications.discord import NotificationResult
+from trading_bot.risk.kill_switch import KillSwitch
+from trading_bot.storage.db import init_db
+
+
+class RiskBlockedAlpaca:
+    def get_positions(self) -> list[dict]:
+        return []
+
+    def get_account(self) -> dict:
+        return {
+            "status": "ACTIVE",
+            "equity": "99400",
+            "last_equity": "100000",
+            "buying_power": "200000",
+            "portfolio_value": "99400",
+        }
 
 
 class FakeNotifier:
@@ -303,6 +325,51 @@ class RunCycleTests(unittest.TestCase):
         self.assertEqual(due, datetime(2026, 6, 4, tzinfo=UTC).date())
         self.assertIsNone(not_due)
 
+    def test_closed_market_sleep_wakes_for_pending_daily_summary_first(self) -> None:
+        target, reason = _scheduler_closed_market_sleep_target(
+            now=datetime(2026, 6, 4, 20, 1, tzinfo=UTC),
+            clock={"next_open": "2026-06-05T09:30:00-04:00"},
+            daily_summary_time=_scheduler_daily_summary_time_et(
+                build_parser().parse_args(["schedule-local"]),
+                load_config("config/settings.yaml"),
+            ),
+            sent_dates=set(),
+            daily_summary_enabled=True,
+        )
+
+        self.assertEqual(target, datetime(2026, 6, 4, 20, 5, tzinfo=UTC))
+        self.assertEqual(reason, "daily_summary")
+
+    def test_closed_market_sleep_wakes_at_next_open_after_summary_sent(self) -> None:
+        target, reason = _scheduler_closed_market_sleep_target(
+            now=datetime(2026, 6, 4, 20, 6, tzinfo=UTC),
+            clock={"next_open": "2026-06-05T09:30:00-04:00"},
+            daily_summary_time=_scheduler_daily_summary_time_et(
+                build_parser().parse_args(["schedule-local"]),
+                load_config("config/settings.yaml"),
+            ),
+            sent_dates={"2026-06-04"},
+            daily_summary_enabled=True,
+        )
+
+        self.assertEqual(target, datetime(2026, 6, 5, 13, 30, tzinfo=UTC))
+        self.assertEqual(reason, "next_open")
+
+    def test_closed_market_sleep_does_not_skip_due_summary_retry(self) -> None:
+        target, reason = _scheduler_closed_market_sleep_target(
+            now=datetime(2026, 6, 4, 20, 6, tzinfo=UTC),
+            clock={"next_open": "2026-06-05T09:30:00-04:00"},
+            daily_summary_time=_scheduler_daily_summary_time_et(
+                build_parser().parse_args(["schedule-local"]),
+                load_config("config/settings.yaml"),
+            ),
+            sent_dates=set(),
+            daily_summary_enabled=True,
+        )
+
+        self.assertIsNone(target)
+        self.assertEqual(reason, "daily_summary_due")
+
     def test_cycle_artifact_skips_open_decisions_when_close_is_recommended(self) -> None:
         config = load_config("config/settings.yaml")
         monitor = monitor_artifact_with_close()
@@ -322,6 +389,47 @@ class RunCycleTests(unittest.TestCase):
         self.assertEqual(artifact["close_recommended_count"], 1)
         self.assertTrue(artifact["skipped_open_decisions"])
         self.assertIsNone(artifact["watchlist_decision"])
+
+    def test_run_cycle_skips_watchlist_when_account_risk_blocks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "bot.sqlite3"
+            init_db(db_path)
+            output_path = Path(tmpdir) / "cycle.json"
+            args = build_parser().parse_args(
+                [
+                    "run-cycle",
+                    "--symbols",
+                    "AAPL",
+                    "--mock-decision",
+                    "skip",
+                    "--json-output",
+                    str(output_path),
+                ]
+            )
+            logger = logging.getLogger("test.run_cycle_risk_block")
+            logger.disabled = True
+
+            with patch("trading_bot.cycles.run_cycle._build_watchlist_decision_run") as watchlist:
+                code = _run_cycle_with_lock(
+                    args=args,
+                    config=load_config("config/settings.yaml"),
+                    logger=logger,
+                    db_path=db_path,
+                    kill_switch=KillSwitch(Path(tmpdir) / "KILL_SWITCH"),
+                    notifier=FakeNotifier(),
+                    started_at=datetime.now(UTC).isoformat(),
+                    alpaca=RiskBlockedAlpaca(),
+                )
+
+            artifact = json.loads(output_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(code, 0)
+        watchlist.assert_not_called()
+        self.assertEqual(artifact["phase"], "monitor_account_risk_block")
+        self.assertTrue(artifact["skipped_open_decisions"])
+        self.assertIn("max_daily_loss", artifact["skip_open_reason"])
+        self.assertIsNone(artifact["watchlist_decision"])
+        self.assertTrue(artifact["account_risk_state"]["blocks_new_opens"])
 
     def test_run_cycle_discord_summary_reports_close_skip(self) -> None:
         config = load_config("config/settings.yaml")
@@ -345,6 +453,40 @@ class RunCycleTests(unittest.TestCase):
         self.assertIn("Open decisions: skipped", notifier.messages[0])
         self.assertIn("AAPL-2099-12-31-305P-300P", notifier.messages[0])
         self.assertIn("preview=ready", notifier.messages[0])
+
+    def test_run_cycle_discord_summary_reports_account_risk_skip(self) -> None:
+        artifact = _build_run_cycle_artifact(
+            config=load_config("config/settings.yaml"),
+            phase="monitor_account_risk_block",
+            monitor_artifact={
+                "generated_at": "2026-06-04T00:00:00+00:00",
+                "option_position_count": 0,
+                "spread_count": 0,
+                "spreads": [],
+                "unpaired_legs": [],
+                "warnings": [],
+            },
+            close_recommended_spreads=[],
+            close_execution_attempts=[],
+            watchlist_artifact=None,
+            skipped_open_reason="Account risk gate blocked new opens: Daily P&L -600 breaches max_daily_loss 500",
+            account_risk_state={
+                "daily_pnl": "-600.00",
+                "weekly_pnl": "-600.00",
+                "new_trades_today": 2,
+                "max_new_trades_per_day": 3,
+                "block_reasons": ["Daily P&L -600 breaches max_daily_loss 500"],
+            },
+        )
+        notifier = FakeNotifier()
+
+        ok = _send_run_cycle_summary(notifier, artifact, logging.getLogger("test"))
+
+        self.assertTrue(ok)
+        self.assertEqual(len(notifier.messages), 1)
+        self.assertIn("Open decisions: skipped", notifier.messages[0])
+        self.assertIn("Account risk:", notifier.messages[0])
+        self.assertIn("daily_pnl=-600.00", notifier.messages[0])
 
     def test_watchlist_discord_sends_full_decision_reason_in_detail_message(self) -> None:
         reason = "This is a long decision reason. " * 12

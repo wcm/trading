@@ -118,6 +118,9 @@ def run_local_scheduler(args: argparse.Namespace) -> int:
         while True:
             now = datetime.now(UTC)
             tick_started = time.monotonic()
+            sleep_seconds = interval_minutes * 60
+            closed_market_sleep_target = None
+            closed_market_sleep_reason = None
             try:
                 clock = alpaca.get_clock()
             except Exception as exc:  # noqa: BLE001 - scheduler should keep supervising after transient API errors
@@ -290,6 +293,32 @@ def run_local_scheduler(args: argparse.Namespace) -> int:
                         if not discord_ok:
                             error_count += 1
 
+                if not args.once and not market_open and not args.ignore_market_hours:
+                    closed_market_sleep_target, closed_market_sleep_reason = _scheduler_closed_market_sleep_target(
+                        now=now,
+                        clock=clock,
+                        daily_summary_time=daily_summary_time,
+                        sent_dates=daily_summary_sent_dates,
+                        daily_summary_enabled=(
+                            not args.skip_daily_summary and (args.send_discord or bool(args.json_output_dir))
+                        ),
+                    )
+                    if closed_market_sleep_target is not None:
+                        sleep_seconds = max(
+                            1.0,
+                            (closed_market_sleep_target - datetime.now(UTC)).total_seconds(),
+                        )
+                        last_status = (
+                            f"{last_status}; sleeping_until={closed_market_sleep_target.isoformat()} "
+                            f"reason={closed_market_sleep_reason}"
+                        )
+                        logger.info(
+                            "Scheduler sleeping while market is closed until %s reason=%s sleep_seconds=%.1f",
+                            closed_market_sleep_target.isoformat(),
+                            closed_market_sleep_reason,
+                            sleep_seconds,
+                        )
+
             if args.once:
                 break
 
@@ -312,7 +341,7 @@ def run_local_scheduler(args: argparse.Namespace) -> int:
                 )
                 next_heartbeat_at = time.monotonic() + heartbeat_minutes * 60
 
-            time.sleep(interval_minutes * 60)
+            time.sleep(sleep_seconds)
     except KeyboardInterrupt:
         last_status = "stopped_by_keyboard_interrupt"
         logger.info("Local scheduler stopped by keyboard interrupt")
@@ -441,6 +470,72 @@ def _scheduler_daily_summary_due_date(
     if now_et.time() < daily_summary_time:
         return None
     return summary_date
+
+
+def _scheduler_closed_market_sleep_target(
+    *,
+    now: datetime,
+    clock: dict,
+    daily_summary_time: dt_time,
+    sent_dates: set[str],
+    daily_summary_enabled: bool,
+) -> tuple[datetime | None, str | None]:
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=UTC)
+    now = now.astimezone(UTC)
+    next_open = _parse_clock_datetime(clock.get("next_open"))
+    pending_summary_at = (
+        _scheduler_pending_daily_summary_at(
+            now,
+            daily_summary_time=daily_summary_time,
+            sent_dates=sent_dates,
+        )
+        if daily_summary_enabled
+        else None
+    )
+    if pending_summary_at is not None:
+        if pending_summary_at <= now:
+            return None, "daily_summary_due"
+        if next_open is None or pending_summary_at < next_open:
+            return pending_summary_at, "daily_summary"
+
+    if next_open is None or next_open <= now:
+        return None, "interval"
+    return next_open, "next_open"
+
+
+def _scheduler_pending_daily_summary_at(
+    now: datetime,
+    *,
+    daily_summary_time: dt_time,
+    sent_dates: set[str],
+) -> datetime | None:
+    now_et = now.astimezone(EASTERN)
+    summary_date = now_et.date()
+    if summary_date.weekday() >= 5:
+        return None
+    if summary_date.isoformat() in sent_dates:
+        return None
+    return datetime.combine(summary_date, daily_summary_time, tzinfo=EASTERN).astimezone(UTC)
+
+
+def _parse_clock_datetime(value: object) -> datetime | None:
+    if isinstance(value, datetime):
+        parsed = value
+    elif value:
+        text = str(value).strip()
+        if text.endswith("Z"):
+            text = f"{text[:-1]}+00:00"
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+    else:
+        return None
+
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=EASTERN)
+    return parsed.astimezone(UTC)
 
 
 def _scheduler_cycle_json_output(args: argparse.Namespace, now: datetime) -> str | None:

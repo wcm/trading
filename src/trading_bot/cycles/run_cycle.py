@@ -25,6 +25,7 @@ from trading_bot.monitoring.positions import monitor_put_credit_spreads
 from trading_bot.notifications.discord import DiscordNotifier
 from trading_bot.notifications.messages import _send_run_cycle_summary
 from trading_bot.risk.kill_switch import KillSwitch
+from trading_bot.risk.account import build_account_risk_state
 from trading_bot.storage.db import (
     record_bot_run,
     record_execution_attempt,
@@ -79,22 +80,24 @@ def _run_cycle_with_lock(
     kill_switch: KillSwitch,
     notifier: DiscordNotifier,
     started_at: str,
+    alpaca: AlpacaClient | None = None,
 ) -> int:
     if kill_switch.is_active():
         logger.warning("Kill switch is active; monitoring continues, open execution remains blocked")
 
-    try:
-        alpaca = AlpacaClient.from_config(config)
-    except AlpacaCredentialsError as exc:
-        logger.error("%s", exc)
-        record_bot_run(
-            db_path,
-            started_at=started_at,
-            mode=config.mode,
-            status="failed",
-            details={"command": "run-cycle", "error": str(exc)},
-        )
-        return 1
+    if alpaca is None:
+        try:
+            alpaca = AlpacaClient.from_config(config)
+        except AlpacaCredentialsError as exc:
+            logger.error("%s", exc)
+            record_bot_run(
+                db_path,
+                started_at=started_at,
+                mode=config.mode,
+                status="failed",
+                details={"command": "run-cycle", "error": str(exc)},
+            )
+            return 1
 
     try:
         monitor_result = monitor_put_credit_spreads(
@@ -129,6 +132,7 @@ def _run_cycle_with_lock(
     watchlist_artifact = None
     successful_count = 0
     skipped_open_reason = None
+    account_risk_state = None
     cycle_status = "ok"
     phase = "monitor_then_open"
 
@@ -140,25 +144,45 @@ def _run_cycle_with_lock(
         cycle_status = "close_recommended"
         logger.warning("Skipping new open decisions: %s", skipped_open_reason)
     else:
-        symbols = watchlist_symbols_from_args_or_config(args, config)
-        if not symbols:
-            logger.error("No symbols configured for run cycle")
+        account_risk_state, account_risk_error = _build_pre_open_account_risk_state(
+            config=config,
+            logger=logger,
+            db_path=db_path,
+            alpaca=alpaca,
+        )
+        if account_risk_error:
+            phase = "monitor_account_risk_error"
+            skipped_open_reason = f"Account risk gate unavailable: {account_risk_error}"
             cycle_status = "failed"
-        else:
-            watchlist_artifact, successful_count = _build_watchlist_decision_run(
-                config=config,
-                logger=logger,
-                db_path=db_path,
-                kill_switch=kill_switch,
-                notifier=notifier,
-                alpaca=alpaca,
-                symbols=symbols,
-                max_candidates=args.max_candidates,
-                option_feed=args.option_feed,
-                mock_decision=args.mock_decision,
-                submit_requested=args.submit_paper,
+            logger.error("Skipping new open decisions: %s", skipped_open_reason)
+        elif account_risk_state and account_risk_state.get("blocks_new_opens"):
+            phase = "monitor_account_risk_block"
+            skipped_open_reason = (
+                "Account risk gate blocked new opens: "
+                + "; ".join(str(reason) for reason in account_risk_state.get("block_reasons", []))
             )
-            cycle_status = "ok" if successful_count else "failed"
+            cycle_status = "open_risk_blocked"
+            logger.warning("Skipping new open decisions: %s", skipped_open_reason)
+        else:
+            symbols = watchlist_symbols_from_args_or_config(args, config)
+            if not symbols:
+                logger.error("No symbols configured for run cycle")
+                cycle_status = "failed"
+            else:
+                watchlist_artifact, successful_count = _build_watchlist_decision_run(
+                    config=config,
+                    logger=logger,
+                    db_path=db_path,
+                    kill_switch=kill_switch,
+                    notifier=notifier,
+                    alpaca=alpaca,
+                    symbols=symbols,
+                    max_candidates=args.max_candidates,
+                    option_feed=args.option_feed,
+                    mock_decision=args.mock_decision,
+                    submit_requested=args.submit_paper,
+                )
+                cycle_status = "ok" if successful_count else "failed"
 
     cycle_artifact = _build_run_cycle_artifact(
         config=config,
@@ -168,6 +192,7 @@ def _run_cycle_with_lock(
         close_execution_attempts=close_execution_attempts,
         watchlist_artifact=watchlist_artifact,
         skipped_open_reason=skipped_open_reason,
+        account_risk_state=account_risk_state,
     )
 
     if args.json_output:
@@ -194,11 +219,34 @@ def _run_cycle_with_lock(
             "close_recommended_count": len(close_recommended_spreads),
             "close_execution_attempt_count": len(close_execution_attempts),
             "watchlist_successful_decision_count": successful_count,
+            "account_risk_state": account_risk_state,
             "discord_requested": args.send_discord,
             "discord_ok": discord_ok,
         },
     )
-    return 0 if final_status in {"ok", "close_recommended"} else 1
+    return 0 if final_status in {"ok", "close_recommended", "open_risk_blocked"} else 1
+
+
+def _build_pre_open_account_risk_state(
+    *,
+    config,
+    logger: logging.Logger,
+    db_path: Path,
+    alpaca: AlpacaClient,
+) -> tuple[dict[str, Any] | None, str | None]:
+    try:
+        account = alpaca.get_account()
+        return (
+            build_account_risk_state(
+                config=config,
+                db_path=db_path,
+                account=account,
+            ).to_dict(),
+            None,
+        )
+    except Exception as exc:  # noqa: BLE001 - fail closed when account risk cannot be checked
+        logger.exception("Pre-open account risk check failed: %s", exc)
+        return None, str(exc)
 
 
 def _build_watchlist_decision_run(
@@ -277,11 +325,18 @@ def _build_watchlist_decision_run(
     selected_order_preview = _selected_order_preview(decision_artifacts, allocation.get("selected_open"))
     execution_attempt = None
     execution_attempt_id = None
+    account_risk_state = None
     if submit_requested or selected_order_preview:
         state_refresh_error = None
         try:
+            final_account = alpaca.get_account()
             final_open_orders = alpaca.get_orders(status="open")
             final_positions = alpaca.get_positions()
+            account_risk_state = build_account_risk_state(
+                config=config,
+                db_path=db_path,
+                account=final_account,
+            ).to_dict()
         except Exception as exc:  # noqa: BLE001 - final execution guard must fail closed
             logger.exception("Final execution state refresh failed: %s", exc)
             state_refresh_error = str(exc)
@@ -297,6 +352,7 @@ def _build_watchlist_decision_run(
             open_orders=final_open_orders,
             open_positions=final_positions,
             allocation=allocation,
+            account_risk_state=account_risk_state,
             state_refresh_error=state_refresh_error,
         )
         if isinstance(execution_attempt.order_preview, dict):
@@ -324,6 +380,7 @@ def _build_watchlist_decision_run(
         "open_revalidation": open_revalidation,
         "allocation": allocation,
         "selected_order_preview": selected_order_preview,
+        "account_risk_state": account_risk_state,
         "execution_attempt_id": execution_attempt_id,
         "execution_attempt": execution_attempt.to_dict() if execution_attempt else None,
     }
@@ -586,6 +643,7 @@ def _build_run_cycle_artifact(
     close_execution_attempts: list[dict[str, Any]],
     watchlist_artifact: dict[str, Any] | None,
     skipped_open_reason: str | None,
+    account_risk_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "generated_at": datetime.now(UTC).isoformat(),
@@ -596,6 +654,7 @@ def _build_run_cycle_artifact(
         "close_recommended_count": len(close_recommended_spreads),
         "close_recommended_spreads": close_recommended_spreads,
         "close_execution_attempts": close_execution_attempts,
+        "account_risk_state": account_risk_state,
         "skipped_open_decisions": bool(skipped_open_reason),
         "skip_open_reason": skipped_open_reason,
         "watchlist_decision": watchlist_artifact,

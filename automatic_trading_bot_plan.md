@@ -1140,6 +1140,7 @@ Known gaps:
 - External earnings/calendar provider integration is still not implemented.
 - No filled paper trade lifecycle has been opened, monitored, closed, and reviewed yet.
 - Cloud deployment is not started.
+- Later-stage risk-pause optimization is not implemented yet: when daily/weekly open-risk gates block new opens and there are no open positions or open orders, the scheduler should enter a quiet risk-pause mode instead of continuing normal monitor/order-poll cadence. In that mode it should skip open discovery, LLM open decisions, position monitoring, and frequent order polling; continue heartbeats, error alerts, and the after-market daily summary; and wake at the next relevant reset boundary, meaning the next trading day for a daily-loss pause or the next trading week for a weekly-loss pause. If any open position or open order exists, monitoring should continue and guarded close/reduce-risk actions should remain allowed.
 - Live trading remains out of scope until paper promotion criteria, Level 3 options approval, and OPRA/live data readiness are satisfied.
 
 Recent implementation commits:

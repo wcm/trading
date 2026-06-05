@@ -206,6 +206,17 @@ def _send_run_cycle_summary(
                 f"preview={_preview_status(spread.get('close_order_preview'))} "
                 f"flags={','.join(active_flags) or '-'}"
             )
+    elif artifact.get("skipped_open_decisions"):
+        risk = artifact.get("account_risk_state") or {}
+        lines.append(f"Open decisions: skipped ({artifact.get('skip_open_reason')})")
+        if risk:
+            lines.append(
+                "Account risk: "
+                f"daily_pnl={risk.get('daily_pnl')} weekly_pnl={risk.get('weekly_pnl')} "
+                f"new_trades_today={risk.get('new_trades_today')}/"
+                f"{risk.get('max_new_trades_per_day')} "
+                f"blocks={len(risk.get('block_reasons') or [])}"
+            )
     else:
         watchlist = artifact.get("watchlist_decision") or {}
         allocation = watchlist.get("allocation") or {}
@@ -231,7 +242,7 @@ def _send_run_cycle_summary(
         )
 
     messages = ["\n".join(lines)]
-    if include_decision_details and not close_spreads:
+    if include_decision_details and not close_spreads and not artifact.get("skipped_open_decisions"):
         messages.extend(_watchlist_decision_detail_messages(watchlist, heading="Run-cycle decision"))
     if _send_discord_messages(notifier, messages, logger, "run-cycle summary"):
         return True

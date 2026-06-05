@@ -26,11 +26,11 @@ account:
 risk:
   max_loss_per_trade: 1000
   max_open_risk: 5000
-  max_open_positions: 3
+  max_open_positions: 50
   max_new_trades_per_day: 3
   max_daily_loss: 500
   max_weekly_loss: 1000
-  disable_after_first_paper_trade: true
+  disable_after_first_paper_trade: false
   disable_after_first_live_trade: true
 
 strategy:
@@ -112,8 +112,8 @@ decision_engine:
   allow_no_trade_decision: true
 
 execution:
-  enable_paper_orders: false
-  enable_paper_close_orders: false
+  enable_paper_orders: true
+  enable_paper_close_orders: true
   order_type: limit
   pre_submit_revalidate_quotes: true
   entry_limit_credit_buffer: 0.05

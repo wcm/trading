@@ -85,6 +85,35 @@ def close_positions() -> list[dict]:
     ]
 
 
+def open_spread_positions() -> list[dict]:
+    return [
+        {
+            "symbol": "AAPL260612P00305000",
+            "qty": "1",
+            "side": "short",
+            "avg_entry_price": "2.00",
+        },
+        {
+            "symbol": "AAPL260612P00300000",
+            "qty": "1",
+            "side": "long",
+            "avg_entry_price": "0.95",
+        },
+        {
+            "symbol": "NVDA260618P00210000",
+            "qty": "1",
+            "side": "short",
+            "avg_entry_price": "2.95",
+        },
+        {
+            "symbol": "NVDA260618P00205000",
+            "qty": "1",
+            "side": "long",
+            "avg_entry_price": "1.83",
+        },
+    ]
+
+
 def inactive_kill_switch() -> KillSwitch:
     with tempfile.TemporaryDirectory() as tmpdir:
         path = Path(tmpdir) / "KILL_SWITCH"
@@ -153,6 +182,81 @@ class ExecutionGateTests(unittest.TestCase):
         self.assertEqual(attempt.status, "submitted")
         self.assertEqual(alpaca.submitted_payloads, [preview["payload"]])
         self.assertEqual(attempt.broker_response, {"id": "paper-order-1", "status": "accepted"})
+
+    def test_position_cap_counts_spread_contracts_not_option_legs(self) -> None:
+        config = config_with_paper_orders_enabled(True)
+        values = copy.deepcopy(config.values)
+        values.setdefault("risk", {})["max_open_positions"] = 3
+        values["risk"]["max_open_risk"] = 5000
+        config = AppConfig(settings_path=config.settings_path, values=values)
+        alpaca = FakeAlpacaSubmitClient()
+        preview = clean_preview(config)
+
+        attempt = maybe_submit_paper_order(
+            config=config,
+            alpaca=alpaca,
+            kill_switch=inactive_kill_switch(),
+            notifier=DiscordNotifier("https://discord.test/webhook"),
+            submit_requested=True,
+            order_preview=preview,
+            open_orders=[],
+            open_positions=open_spread_positions(),
+            allocation=allocation(),
+        )
+
+        self.assertTrue(attempt.submitted)
+        self.assertEqual(alpaca.submitted_payloads, [preview["payload"]])
+
+    def test_blocks_when_projected_open_risk_exceeds_budget(self) -> None:
+        config = config_with_paper_orders_enabled(True)
+        values = copy.deepcopy(config.values)
+        values.setdefault("risk", {})["max_open_positions"] = 50
+        values["risk"]["max_open_risk"] = 1000
+        config = AppConfig(settings_path=config.settings_path, values=values)
+        alpaca = FakeAlpacaSubmitClient()
+
+        attempt = maybe_submit_paper_order(
+            config=config,
+            alpaca=alpaca,
+            kill_switch=inactive_kill_switch(),
+            notifier=DiscordNotifier("https://discord.test/webhook"),
+            submit_requested=True,
+            order_preview=clean_preview(config),
+            open_orders=[],
+            open_positions=open_spread_positions(),
+            allocation=allocation(),
+        )
+
+        self.assertFalse(attempt.submitted)
+        self.assertTrue(any("Projected open risk" in reason for reason in attempt.block_reasons))
+        self.assertEqual(alpaca.submitted_payloads, [])
+
+    def test_blocks_when_account_risk_gate_blocks_new_opens(self) -> None:
+        config = config_with_paper_orders_enabled(True)
+        alpaca = FakeAlpacaSubmitClient()
+
+        attempt = maybe_submit_paper_order(
+            config=config,
+            alpaca=alpaca,
+            kill_switch=inactive_kill_switch(),
+            notifier=DiscordNotifier("https://discord.test/webhook"),
+            submit_requested=True,
+            order_preview=clean_preview(config),
+            open_orders=[],
+            open_positions=[],
+            allocation=allocation(),
+            account_risk_state={
+                "blocks_new_opens": True,
+                "block_reasons": ["Daily P&L -600 breaches max_daily_loss 500"],
+            },
+        )
+
+        self.assertFalse(attempt.submitted)
+        self.assertIn(
+            "Account risk gate: Daily P&L -600 breaches max_daily_loss 500",
+            attempt.block_reasons,
+        )
+        self.assertEqual(alpaca.submitted_payloads, [])
 
     def test_blocks_when_final_state_refresh_failed(self) -> None:
         config = config_with_paper_orders_enabled(True)

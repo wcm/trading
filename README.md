@@ -181,7 +181,40 @@ The scheduler also polls recent Alpaca order statuses after each check unless
 When positions are open, the scheduler runs monitor-only supervision on the
 1-minute tick; new open decisions run on the slower open interval. The
 after-market daily summary is sent at `runtime.scheduler_daily_summary_time_et`
-unless `--skip-daily-summary` is used.
+unless `--skip-daily-summary` is used. When Alpaca reports that the market is
+closed, the scheduler sleeps until the daily summary is due, then sleeps until
+Alpaca's next market open.
+
+Run the paper scheduler with open and close submissions enabled:
+
+```bash
+uv run trading-bot schedule-local --send-discord --send-cycle-discord --cycle-summary-only --json-output-dir data/scheduler_cycles --submit-paper --submit-paper-close
+```
+
+New opens are mechanically blocked by account/risk gates before symbol discovery
+and LLM decision calls:
+
+- `risk.max_open_risk` as aggregate projected put-spread max loss
+- `risk.max_new_trades_per_day`
+- `risk.max_daily_loss`
+- `risk.max_weekly_loss` based on bot-observed account snapshots
+- `account.emergency_equity_floor`
+
+Filled Alpaca MLeg open/close orders are persisted to SQLite `spread_trades`
+when `poll-orders`, `run-cycle`, or `schedule-local` observes lifecycle changes.
+
+## Cloud Worker
+
+The first cloud path is a Docker Compose worker on a small VPS:
+
+```bash
+docker compose build
+docker compose run --rm trading-bot uv run --no-sync trading-bot smoke --check-alpaca --send-discord
+docker compose up -d
+docker compose logs -f trading-bot
+```
+
+See `deploy/cloud-vps.md` for setup and operations.
 
 The decision packet includes account/position/order state, option candidates,
 intraday move, 30-minute moving-average trend context, option quote freshness,

@@ -8,8 +8,26 @@ from trading_bot.brokers.alpaca import AlpacaClient
 from trading_bot.config import AppConfig
 from trading_bot.execution.entry_orders import manage_entry_order_after_submission
 from trading_bot.execution.revalidation import revalidate_put_credit_spread_entry_preview
+from trading_bot.monitoring.positions import parse_occ_option_symbol
 from trading_bot.notifications.discord import DiscordNotifier
 from trading_bot.risk.kill_switch import KillSwitch
+
+
+@dataclass(frozen=True)
+class _OpenPutLeg:
+    symbol: str
+    underlying_symbol: str
+    expiration_date: Any
+    strike: Decimal
+    side: str
+    quantity: int
+    average_entry_price: Decimal | None
+
+
+@dataclass(frozen=True)
+class _OpenPutSpreadExposure:
+    contract_count: int
+    max_loss: Decimal
 
 
 @dataclass(frozen=True)
@@ -39,6 +57,7 @@ def maybe_submit_paper_order(
     open_orders: list[dict[str, Any]],
     open_positions: list[dict[str, Any]],
     allocation: dict[str, Any],
+    account_risk_state: dict[str, Any] | None = None,
     state_refresh_error: str | None = None,
 ) -> PaperExecutionAttempt:
     order_preview = _maybe_revalidate_entry_order_preview(
@@ -56,6 +75,7 @@ def maybe_submit_paper_order(
         open_orders=open_orders,
         open_positions=open_positions,
         allocation=allocation,
+        account_risk_state=account_risk_state,
         state_refresh_error=state_refresh_error,
     )
     payload = order_preview.get("payload") if isinstance(order_preview, dict) else None
@@ -223,6 +243,7 @@ def _paper_execution_block_reasons(
     open_orders: list[dict[str, Any]],
     open_positions: list[dict[str, Any]],
     allocation: dict[str, Any],
+    account_risk_state: dict[str, Any] | None,
     state_refresh_error: str | None,
 ) -> list[str]:
     reasons: list[str] = []
@@ -238,6 +259,9 @@ def _paper_execution_block_reasons(
         reasons.append(f"Kill switch is active at {kill_switch.path}")
     if not notifier.is_configured:
         reasons.append("Discord webhook is not configured")
+    if isinstance(account_risk_state, dict) and account_risk_state.get("blocks_new_opens"):
+        for reason in account_risk_state.get("block_reasons") or []:
+            reasons.append(f"Account risk gate: {reason}")
     if not isinstance(order_preview, dict):
         reasons.append("No selected order preview is available")
         return reasons
@@ -267,17 +291,34 @@ def _paper_execution_block_reasons(
         if not isinstance(max_contracts, int) or max_contracts < 1:
             reasons.append("Selected open does not fit max_open_risk budget")
 
+    max_open_risk = _decimal_or_none(config.get("risk", "max_open_risk", default=0)) or Decimal("0")
+    preview_max_loss = _decimal_or_none(order_preview.get("estimated_max_loss")) or Decimal("0")
+    preview_contracts = _preview_contract_count(order_preview)
+    exposure = _open_put_spread_exposure(open_positions)
+
     symbol = str(order_preview.get("symbol") or "")
     max_open_positions = int(config.get("risk", "max_open_positions", default=0))
-    if max_open_positions > 0 and len(open_positions) >= max_open_positions:
-        reasons.append(f"Max open positions reached: {len(open_positions)}/{max_open_positions}")
+    projected_positions = exposure.contract_count + preview_contracts
+    if max_open_positions > 0 and projected_positions > max_open_positions:
+        reasons.append(
+            (
+                f"Projected open strategy positions {projected_positions} exceed "
+                f"max_open_positions {max_open_positions}"
+            )
+        )
     if symbol and _has_duplicate_open_order(symbol=symbol, open_orders=open_orders):
         reasons.append(f"Duplicate open order already exists for {symbol}")
 
-    max_open_risk = _decimal_or_none(config.get("risk", "max_open_risk", default=0)) or Decimal("0")
-    preview_max_loss = _decimal_or_none(order_preview.get("estimated_max_loss")) or Decimal("0")
+    projected_open_risk = exposure.max_loss + preview_max_loss
     if max_open_risk > 0 and preview_max_loss > max_open_risk:
         reasons.append(f"Preview max loss {preview_max_loss} exceeds max_open_risk {max_open_risk}")
+    elif max_open_risk > 0 and projected_open_risk > max_open_risk:
+        reasons.append(
+            (
+                f"Projected open risk {projected_open_risk} exceeds max_open_risk {max_open_risk} "
+                f"(current {exposure.max_loss} + preview {preview_max_loss})"
+            )
+        )
 
     return reasons
 
@@ -401,6 +442,106 @@ def _missing_position_symbols(*, leg_symbols: set[str], open_positions: list[dic
         if isinstance(position, dict) and position.get("symbol")
     }
     return sorted(symbol for symbol in leg_symbols if symbol not in position_symbols)
+
+
+def _preview_contract_count(order_preview: dict[str, Any]) -> int:
+    payload = order_preview.get("payload")
+    if not isinstance(payload, dict):
+        return 0
+    quantity = _decimal_or_none(payload.get("qty"))
+    if quantity is None or quantity <= 0:
+        return 0
+    return int(quantity)
+
+
+def _open_put_spread_exposure(open_positions: list[dict[str, Any]]) -> _OpenPutSpreadExposure:
+    legs = [_position_to_open_put_leg(position) for position in open_positions]
+    put_legs = [leg for leg in legs if leg is not None]
+    pairs = _pair_open_put_spread_legs(put_legs)
+
+    contract_count = 0
+    max_loss = Decimal("0")
+    for short_leg, long_leg in pairs:
+        width = short_leg.strike - long_leg.strike
+        if width <= 0:
+            continue
+        entry_credit = _open_spread_entry_credit(short_leg, long_leg) or Decimal("0")
+        per_contract_loss = max(Decimal("0"), width - entry_credit) * Decimal("100")
+        contract_count += short_leg.quantity
+        max_loss += per_contract_loss * Decimal(short_leg.quantity)
+
+    return _OpenPutSpreadExposure(contract_count=contract_count, max_loss=max_loss)
+
+
+def _position_to_open_put_leg(position: dict[str, Any]) -> _OpenPutLeg | None:
+    symbol = str(position.get("symbol") or "").strip().upper()
+    parsed = parse_occ_option_symbol(symbol)
+    if parsed is None or parsed.option_type != "put":
+        return None
+
+    quantity = _decimal_or_none(position.get("qty"))
+    if quantity is None or quantity == 0:
+        return None
+    quantity_abs = int(abs(quantity))
+    if quantity_abs <= 0:
+        return None
+
+    side = str(position.get("side") or "").lower()
+    if side not in {"long", "short"}:
+        side = "short" if quantity < 0 else "long"
+
+    return _OpenPutLeg(
+        symbol=parsed.symbol,
+        underlying_symbol=parsed.underlying_symbol,
+        expiration_date=parsed.expiration_date,
+        strike=parsed.strike,
+        side=side,
+        quantity=quantity_abs,
+        average_entry_price=_position_average_entry_price(position, quantity_abs),
+    )
+
+
+def _pair_open_put_spread_legs(legs: list[_OpenPutLeg]) -> list[tuple[_OpenPutLeg, _OpenPutLeg]]:
+    short_puts = [leg for leg in legs if leg.side == "short"]
+    long_puts = [leg for leg in legs if leg.side == "long"]
+    used_long_symbols: set[str] = set()
+    pairs: list[tuple[_OpenPutLeg, _OpenPutLeg]] = []
+
+    for short_leg in sorted(short_puts, key=lambda leg: (leg.underlying_symbol, leg.expiration_date, -leg.strike)):
+        candidates = [
+            leg
+            for leg in long_puts
+            if leg.symbol not in used_long_symbols
+            and leg.underlying_symbol == short_leg.underlying_symbol
+            and leg.expiration_date == short_leg.expiration_date
+            and leg.strike < short_leg.strike
+            and leg.quantity == short_leg.quantity
+        ]
+        if not candidates:
+            continue
+        long_leg = max(candidates, key=lambda leg: leg.strike)
+        used_long_symbols.add(long_leg.symbol)
+        pairs.append((short_leg, long_leg))
+
+    return pairs
+
+
+def _open_spread_entry_credit(short_leg: _OpenPutLeg, long_leg: _OpenPutLeg) -> Decimal | None:
+    if short_leg.average_entry_price is None or long_leg.average_entry_price is None:
+        return None
+    return max(Decimal("0"), short_leg.average_entry_price - long_leg.average_entry_price)
+
+
+def _position_average_entry_price(position: dict[str, Any], quantity_abs: int) -> Decimal | None:
+    for key in ("avg_entry_price", "average_entry_price", "avg_entry_price_per_share"):
+        avg_entry = _decimal_or_none(position.get(key))
+        if avg_entry is not None:
+            return abs(avg_entry)
+
+    cost_basis = _decimal_or_none(position.get("cost_basis"))
+    if cost_basis is None or quantity_abs <= 0:
+        return None
+    return abs(cost_basis) / Decimal(quantity_abs) / Decimal("100")
 
 
 def _decimal_or_none(value: Any) -> Decimal | None:
