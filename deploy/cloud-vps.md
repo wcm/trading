@@ -5,6 +5,14 @@ This project runs as a background worker, not a web app. A small Ubuntu VPS with
 ## First Deploy
 
 1. Install Docker and the Compose plugin on the VPS.
+
+```bash
+./deploy/bootstrap-ubuntu-docker.sh
+```
+
+This script follows Docker's official Ubuntu apt-repository install path and
+installs the Compose plugin package.
+
 2. Clone or copy this repo to the VPS.
 3. Create `.env` from `config/secrets.example.env` and fill in:
    - `ALPACA_API_KEY_ID`
