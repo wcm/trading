@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import logging
 import tempfile
@@ -10,17 +12,16 @@ from unittest.mock import patch
 
 from trading_bot.config import load_config
 from trading_bot.cli.parser import build_parser
-from trading_bot.cycles.run_cycle import (
-    _build_run_cycle_artifact,
-    _close_recommended_spreads,
+from trading_bot.cycles.open_discovery import (
+    _build_open_discovery_cycle_artifact,
     _max_concurrent_symbols,
-    _run_cycle_with_lock,
+    _run_open_discovery_cycle_with_lock,
 )
 from trading_bot.notifications.messages import (
     _send_daily_trading_summary,
+    _send_open_discovery_summary,
     _send_order_poll_summary,
     _send_watchlist_decision_summary,
-    _send_run_cycle_summary,
 )
 from trading_bot.scheduler.local import (
     _scheduler_closed_market_sleep_target,
@@ -60,26 +61,6 @@ class FakeNotifier:
     def send(self, content: str) -> NotificationResult:
         self.messages.append(content)
         return NotificationResult(ok=True)
-
-
-def monitor_artifact_with_close() -> dict:
-    return {
-        "generated_at": "2026-06-04T00:00:00+00:00",
-        "option_position_count": 2,
-        "spread_count": 1,
-        "spreads": [
-            {
-                "spread_id": "AAPL-2099-12-31-305P-300P",
-                "close_recommended": True,
-                "close_debit": "0.4",
-                "estimated_unrealized_pnl": "65",
-                "exit_flags": {"profit_target_hit": True},
-                "close_order_preview": {"errors": [], "payload": {"order_class": "mleg"}},
-            }
-        ],
-        "unpaired_legs": [],
-        "warnings": [],
-    }
 
 
 def watchlist_artifact_with_reason(reason: str) -> dict:
@@ -124,30 +105,10 @@ def watchlist_artifact_with_reason(reason: str) -> dict:
     }
 
 
-class RunCycleTests(unittest.TestCase):
-    def test_parser_accepts_run_cycle_args(self) -> None:
-        args = build_parser().parse_args(
-            [
-                "run-cycle",
-                "--symbols",
-                "AAPL,MSFT",
-                "--max-candidates",
-                "3",
-                "--mock-decision",
-                "skip",
-                "--discord-summary-only",
-                "--submit-paper",
-                "--submit-paper-close",
-            ]
-        )
-
-        self.assertEqual(args.command, "run-cycle")
-        self.assertEqual(args.symbols, "AAPL,MSFT")
-        self.assertEqual(args.max_candidates, 3)
-        self.assertEqual(args.mock_decision, "skip")
-        self.assertTrue(args.discord_summary_only)
-        self.assertTrue(args.submit_paper)
-        self.assertTrue(args.submit_paper_close)
+class OpenDiscoveryTests(unittest.TestCase):
+    def test_parser_rejects_removed_run_cycle_command(self) -> None:
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            build_parser().parse_args(["run-cycle"])
 
     def test_parser_accepts_schedule_local_args(self) -> None:
         args = build_parser().parse_args(
@@ -257,7 +218,7 @@ class RunCycleTests(unittest.TestCase):
         self.assertEqual(_scheduler_daily_summary_time_et(args, config).strftime("%H:%M"), "16:05")
 
         cycle_args = _scheduler_cycle_args(args, "data/test_cycle.json")
-        self.assertEqual(cycle_args.command, "run-cycle")
+        self.assertEqual(cycle_args.command, "open-discovery-cycle")
         self.assertEqual(cycle_args.symbols, "AAPL")
         self.assertEqual(cycle_args.max_candidates, 2)
         self.assertFalse(cycle_args.send_discord)
@@ -297,7 +258,7 @@ class RunCycleTests(unittest.TestCase):
 
         self.assertIsNotNone(path)
         assert path is not None
-        self.assertTrue(path.endswith("data/scheduler_cycles/run_cycle_20260604T153000Z.json"))
+        self.assertTrue(path.endswith("data/scheduler_cycles/open_discovery_20260604T153000Z.json"))
 
     def test_scheduler_daily_summary_helpers(self) -> None:
         args = build_parser().parse_args(
@@ -370,47 +331,20 @@ class RunCycleTests(unittest.TestCase):
         self.assertIsNone(target)
         self.assertEqual(reason, "daily_summary_due")
 
-    def test_cycle_artifact_skips_open_decisions_when_close_is_recommended(self) -> None:
-        config = load_config("config/settings.yaml")
-        monitor = monitor_artifact_with_close()
-        close_spreads = _close_recommended_spreads(monitor)
-
-        artifact = _build_run_cycle_artifact(
-            config=config,
-            phase="monitor_close_alert",
-            monitor_artifact=monitor,
-            close_recommended_spreads=close_spreads,
-            close_execution_attempts=[],
-            watchlist_artifact=None,
-            skipped_open_reason="1 existing spread(s) have close_recommended=true",
-        )
-
-        self.assertEqual(artifact["phase"], "monitor_close_alert")
-        self.assertEqual(artifact["close_recommended_count"], 1)
-        self.assertTrue(artifact["skipped_open_decisions"])
-        self.assertIsNone(artifact["watchlist_decision"])
-
-    def test_run_cycle_skips_watchlist_when_account_risk_blocks(self) -> None:
+    def test_open_discovery_cycle_skips_watchlist_when_account_risk_blocks(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "bot.sqlite3"
             init_db(db_path)
-            output_path = Path(tmpdir) / "cycle.json"
-            args = build_parser().parse_args(
-                [
-                    "run-cycle",
-                    "--symbols",
-                    "AAPL",
-                    "--mock-decision",
-                    "skip",
-                    "--json-output",
-                    str(output_path),
-                ]
+            output_path = Path(tmpdir) / "open_discovery.json"
+            scheduler_args = build_parser().parse_args(
+                ["schedule-local", "--symbols", "AAPL", "--mock-decision", "skip"]
             )
-            logger = logging.getLogger("test.run_cycle_risk_block")
+            args = _scheduler_cycle_args(scheduler_args, str(output_path))
+            logger = logging.getLogger("test.open_discovery_risk_block")
             logger.disabled = True
 
-            with patch("trading_bot.cycles.run_cycle._build_watchlist_decision_run") as watchlist:
-                code = _run_cycle_with_lock(
+            with patch("trading_bot.cycles.open_discovery._build_watchlist_decision_run") as watchlist:
+                code = _run_open_discovery_cycle_with_lock(
                     args=args,
                     config=load_config("config/settings.yaml"),
                     logger=logger,
@@ -425,49 +359,17 @@ class RunCycleTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         watchlist.assert_not_called()
-        self.assertEqual(artifact["phase"], "monitor_account_risk_block")
+        self.assertEqual(artifact["command"], "open-discovery-cycle")
+        self.assertEqual(artifact["phase"], "open_account_risk_block")
         self.assertTrue(artifact["skipped_open_decisions"])
-        self.assertIn("max_daily_loss", artifact["skip_open_reason"])
+        self.assertNotIn("monitor", artifact)
         self.assertIsNone(artifact["watchlist_decision"])
         self.assertTrue(artifact["account_risk_state"]["blocks_new_opens"])
 
-    def test_run_cycle_discord_summary_reports_close_skip(self) -> None:
-        config = load_config("config/settings.yaml")
-        monitor = monitor_artifact_with_close()
-        close_spreads = _close_recommended_spreads(monitor)
-        artifact = _build_run_cycle_artifact(
-            config=config,
-            phase="monitor_close_alert",
-            monitor_artifact=monitor,
-            close_recommended_spreads=close_spreads,
-            close_execution_attempts=[],
-            watchlist_artifact=None,
-            skipped_open_reason="1 existing spread(s) have close_recommended=true",
-        )
-        notifier = FakeNotifier()
-
-        ok = _send_run_cycle_summary(notifier, artifact, logging.getLogger("test"))
-
-        self.assertTrue(ok)
-        self.assertEqual(len(notifier.messages), 1)
-        self.assertIn("Open decisions: skipped", notifier.messages[0])
-        self.assertIn("AAPL-2099-12-31-305P-300P", notifier.messages[0])
-        self.assertIn("preview=ready", notifier.messages[0])
-
-    def test_run_cycle_discord_summary_reports_account_risk_skip(self) -> None:
-        artifact = _build_run_cycle_artifact(
+    def test_open_discovery_discord_summary_reports_account_risk_skip(self) -> None:
+        artifact = _build_open_discovery_cycle_artifact(
             config=load_config("config/settings.yaml"),
-            phase="monitor_account_risk_block",
-            monitor_artifact={
-                "generated_at": "2026-06-04T00:00:00+00:00",
-                "option_position_count": 0,
-                "spread_count": 0,
-                "spreads": [],
-                "unpaired_legs": [],
-                "warnings": [],
-            },
-            close_recommended_spreads=[],
-            close_execution_attempts=[],
+            phase="open_account_risk_block",
             watchlist_artifact=None,
             skipped_open_reason="Account risk gate blocked new opens: Daily P&L -600 breaches max_daily_loss 500",
             account_risk_state={
@@ -480,13 +382,15 @@ class RunCycleTests(unittest.TestCase):
         )
         notifier = FakeNotifier()
 
-        ok = _send_run_cycle_summary(notifier, artifact, logging.getLogger("test"))
+        ok = _send_open_discovery_summary(notifier, artifact, logging.getLogger("test"))
 
         self.assertTrue(ok)
         self.assertEqual(len(notifier.messages), 1)
-        self.assertIn("Open decisions: skipped", notifier.messages[0])
+        self.assertIn("New trade search complete", notifier.messages[0])
+        self.assertIn("What happened: Risk limits blocked", notifier.messages[0])
+        self.assertIn("New trades: skipped", notifier.messages[0])
         self.assertIn("Account risk:", notifier.messages[0])
-        self.assertIn("daily_pnl=-600.00", notifier.messages[0])
+        self.assertNotIn("Phase:", notifier.messages[0])
 
     def test_watchlist_discord_sends_full_decision_reason_in_detail_message(self) -> None:
         reason = "This is a long decision reason. " * 12
@@ -501,28 +405,18 @@ class RunCycleTests(unittest.TestCase):
         self.assertNotIn(reason, notifier.messages[0])
         self.assertIn(reason, notifier.messages[1])
 
-    def test_run_cycle_discord_chunks_full_decision_reason_when_needed(self) -> None:
+    def test_open_discovery_discord_chunks_full_decision_reason_when_needed(self) -> None:
         reason = "R" * 2300
         watchlist = watchlist_artifact_with_reason(reason)
-        artifact = _build_run_cycle_artifact(
+        artifact = _build_open_discovery_cycle_artifact(
             config=load_config("config/settings.yaml"),
-            phase="monitor_then_open",
-            monitor_artifact={
-                "generated_at": "2026-06-04T00:00:00+00:00",
-                "option_position_count": 0,
-                "spread_count": 0,
-                "spreads": [],
-                "unpaired_legs": [],
-                "warnings": [],
-            },
-            close_recommended_spreads=[],
-            close_execution_attempts=[],
+            phase="open_discovery",
             watchlist_artifact=watchlist,
             skipped_open_reason=None,
         )
         notifier = FakeNotifier()
 
-        ok = _send_run_cycle_summary(notifier, artifact, logging.getLogger("test"))
+        ok = _send_open_discovery_summary(notifier, artifact, logging.getLogger("test"))
 
         self.assertTrue(ok)
         self.assertGreater(len(notifier.messages), 2)

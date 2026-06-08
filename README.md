@@ -4,8 +4,9 @@ Cloud-paper, paper-first options trading bot experiment.
 
 Start here:
 
-- [automatic_trading_bot_plan.md](automatic_trading_bot_plan.md): strategy, current state, roadmap, and known gaps.
+- [automatic_trading_bot_infra.md](automatic_trading_bot_infra.md): shared infrastructure, multi-strategy architecture, roadmap, and known gaps.
 - [automatic_trading_bot_runbook.md](automatic_trading_bot_runbook.md): beginner-friendly operations commands, cloud access, deploy workflow, logs, smoke tests, and emergency stop.
+- [strategy/put_credit_strategy.md](strategy/put_credit_strategy.md): current strategy explained simply.
 - `deploy/update-cloud.sh`: one-command cloud update after local changes are committed and pushed.
 
 Current status:
@@ -13,6 +14,7 @@ Current status:
 - Alpaca paper mode only; live trading is out of scope for now.
 - Normal scheduler runs on the DigitalOcean VPS through Docker Compose.
 - Local scheduler should stay stopped while the cloud scheduler is running.
+- Only `put_credit_strategy` is implemented today; the infra plan is being shaped so multiple strategies can share the same bot infrastructure later.
 - Paper open/close execution is protected by both config locks and CLI flags; the current cloud paper experiment deliberately enables both in paper mode.
 
 The bot cycle:
@@ -62,7 +64,7 @@ full command list.
 - `trading_bot/cli/parser.py`: command-line parser.
 - `trading_bot/app.py`: config, logging, SQLite, kill switch, and notifier bootstrap.
 - `trading_bot/commands/`: command wrappers for smoke, scans, decisions, and position monitoring.
-- `trading_bot/cycles/`: monitor-before-open run-cycle and watchlist decision orchestration.
+- `trading_bot/cycles/`: open-discovery, manual monitor-before-open cycle, and watchlist decision orchestration.
 - `trading_bot/execution/`: Alpaca MLeg previews, execution gates, pre-submit revalidation, and entry order management.
 - `trading_bot/scheduler/`: local split-cadence scheduler.
 - `trading_bot/summaries/`: daily trading summary construction.
@@ -163,7 +165,7 @@ uv run trading-bot monitor-positions --submit-paper-close --send-discord
 The command above still refuses to submit close orders unless
 `execution.enable_paper_close_orders: true` is set in `config/settings.yaml`.
 Blocked or submitted close attempts are logged to SQLite `execution_attempts`.
-`run-cycle` and `schedule-local` also accept `--submit-paper-close`.
+`schedule-local` also accepts `--submit-paper-close`.
 
 Poll recent Alpaca orders and record lifecycle changes:
 
@@ -174,23 +176,6 @@ uv run trading-bot poll-orders --status all --limit 50 --send-discord --json-out
 Repeated polls only notify when an order status or filled quantity changes,
 unless `--notify-no-changes` is provided. Large lifecycle updates are split
 across Discord messages instead of truncating changed orders.
-
-Run one full local bot cycle. This monitors existing positions first, skips new
-open decisions when any spread has a close recommendation, and otherwise runs
-the watchlist decision/allocation path:
-
-```bash
-uv run trading-bot run-cycle --max-candidates 20 --send-discord --json-output data/last_run_cycle.json
-```
-
-`run-cycle` uses `runtime.cycle_lock_path` so overlapping scheduled cycles
-refuse to start.
-
-Test the same cycle without calling OpenAI:
-
-```bash
-uv run trading-bot run-cycle --symbols AAPL,MSFT --max-candidates 3 --mock-decision skip
-```
 
 Build a trading-focused daily summary:
 
@@ -212,14 +197,16 @@ Validate one scheduler check safely without OpenAI:
 uv run trading-bot schedule-local --symbols AAPL --max-candidates 1 --mock-decision skip --send-discord --json-output-dir data/scheduler_cycles --once
 ```
 
-Use `--send-cycle-discord` only when you want every scheduled cycle to also send
-the full run-cycle decision summary.
-Add `--cycle-summary-only` when you want only the compact run-cycle/open-discovery
-summary without per-symbol detail messages.
+Use `--send-cycle-discord` only when you want every scheduled new-open search to
+also send a Discord summary.
+Add `--cycle-summary-only` when you want only the compact new-open summary
+without per-symbol detail messages.
 The scheduler also polls recent Alpaca order statuses after each check unless
 `--skip-order-poll` is used.
-When positions are open, the scheduler runs monitor-only supervision on the
-1-minute tick; new open decisions run on the slower open interval. The
+When positions are open, the scheduler runs a close-check monitor on every
+1-minute tick. If there are no open positions, there is nothing to close, so
+that monitor step is skipped. Separately, every 5 minutes the scheduler looks
+for new opportunities as long as the account risk gates allow new trades. The
 after-market daily summary is sent at `runtime.scheduler_daily_summary_time_et`
 unless `--skip-daily-summary` is used. When Alpaca reports that the market is
 closed, the scheduler sleeps until the daily summary is due, then sleeps until
@@ -241,7 +228,7 @@ and LLM decision calls:
 - `account.emergency_equity_floor`
 
 Filled Alpaca MLeg open/close orders are persisted to SQLite `spread_trades`
-when `poll-orders`, `run-cycle`, or `schedule-local` observes lifecycle changes.
+when `poll-orders` or `schedule-local` observes lifecycle changes.
 
 ## Cloud Worker
 

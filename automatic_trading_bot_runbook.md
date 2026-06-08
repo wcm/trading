@@ -3,8 +3,10 @@
 Last updated: 2026-06-05
 
 This runbook explains how to operate the current paper-trading bot locally and
-on the DigitalOcean VPS. Strategy, risk decisions, roadmap, and known gaps live
-in [automatic_trading_bot_plan.md](automatic_trading_bot_plan.md).
+on the DigitalOcean VPS. Shared infrastructure, risk architecture, roadmap, and
+known gaps live in
+[automatic_trading_bot_infra.md](automatic_trading_bot_infra.md). Individual
+strategy notes live in the `strategy/` folder.
 
 ## Read This First
 
@@ -19,7 +21,8 @@ Use this file when you forget what to type. The short mental model is:
 
 Important files:
 
-- `automatic_trading_bot_plan.md`: strategy, roadmap, known gaps.
+- `automatic_trading_bot_infra.md`: shared bot infrastructure, multi-strategy roadmap, known gaps.
+- `strategy/put_credit_strategy.md`: current put credit strategy explained simply.
 - `automatic_trading_bot_runbook.md`: commands and operations.
 - `config/settings.yaml`: trading/risk/scheduler config.
 - `.env`: local secrets; never commit this.
@@ -346,14 +349,16 @@ uv run --no-sync trading-bot schedule-local \
 Current cadence:
 
 - Scheduler tick: every 1 minute.
-- New-open discovery: every 5 minutes.
-- Position monitor: every minute when open positions exist.
+- Position monitor: close-check only, every minute when open positions exist.
+- New-open discovery: every 5 minutes as long as risk gates allow new trades.
 - Order lifecycle poll: after each scheduler check.
 - Daily summary: after market close, currently 16:05 ET.
 - Off-hours behavior: sleeps until daily summary or Alpaca next market open.
 
-The scheduler always monitors existing positions before considering new opens.
-If risk gates block new opens, open discovery and LLM open decisions are skipped.
+The monitor step only answers: "Do we need to close an existing position?" If
+there are no open positions, there is nothing to monitor. The new-opportunity
+search is separate: every 5 minutes, the bot looks for new trades as long as
+risk gates allow new opens.
 
 ## 8. Local Commands
 
@@ -380,15 +385,6 @@ uv run trading-bot schedule-local \
   --send-discord \
   --json-output-dir data/scheduler_cycles \
   --once
-```
-
-Run one full cycle without order submission:
-
-```bash
-uv run trading-bot run-cycle \
-  --max-candidates 20 \
-  --send-discord \
-  --json-output data/last_run_cycle.json
 ```
 
 Run the local scheduler only when the cloud scheduler is stopped:
@@ -479,8 +475,8 @@ Before market open:
 
 During market hours:
 
-- Position monitor runs before open discovery.
-- New-open discovery runs on the 5-minute cadence.
+- Position monitor only checks whether existing positions should close.
+- New-open discovery runs on the 5-minute cadence if risk gates allow it.
 - Discord summaries arrive without truncating important content.
 - Order lifecycle polling does not repeatedly spam unchanged orders.
 - No duplicate orders appear in Alpaca.

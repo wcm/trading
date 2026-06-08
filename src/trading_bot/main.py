@@ -10,9 +10,8 @@ from trading_bot.commands.basic import (
     run_smoke,
     run_watchlist_decisions,
 )
-from trading_bot.cycles.run_cycle import (
+from trading_bot.cycles.open_discovery import (
     _build_decision_artifact,
-    _build_run_cycle_artifact,
     _build_watchlist_decision_run,
     _close_recommended_spreads,
     _compact_watchlist_artifact,
@@ -22,7 +21,6 @@ from trading_bot.cycles.run_cycle import (
     _mock_decision,
     _selected_candidate_from_packet,
     _selected_order_preview,
-    run_cycle,
 )
 from trading_bot.notifications.messages import (
     _close_execution_status_lines,
@@ -34,7 +32,6 @@ from trading_bot.notifications.messages import (
     _send_discord_messages,
     _send_order_poll_summary,
     _send_position_monitor_summary,
-    _send_run_cycle_summary,
     _send_scan_summary,
     _send_scheduler_error,
     _send_scheduler_heartbeat,
@@ -96,8 +93,6 @@ def main(argv: list[str] | None = None) -> int:
         return run_order_poll(args)
     if args.command == "daily-summary":
         return run_daily_summary(args)
-    if args.command == "run-cycle":
-        return run_cycle(args)
     if args.command == "schedule-local":
         return run_local_scheduler(args)
 

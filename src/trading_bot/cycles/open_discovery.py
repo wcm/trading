@@ -21,9 +21,8 @@ from trading_bot.execution.revalidation import revalidate_put_credit_spread_entr
 from trading_bot.llm.decision import build_decision_packet, candidate_dicts_by_id, packet_candidate_ids
 from trading_bot.llm.openai_client import OpenAIClient, OpenAIClientError
 from trading_bot.llm.schemas import validate_decision_payload
-from trading_bot.monitoring.positions import monitor_put_credit_spreads
 from trading_bot.notifications.discord import DiscordNotifier
-from trading_bot.notifications.messages import _send_run_cycle_summary
+from trading_bot.notifications.messages import _send_open_discovery_summary
 from trading_bot.risk.kill_switch import KillSwitch
 from trading_bot.risk.account import build_account_risk_state
 from trading_bot.storage.db import (
@@ -41,24 +40,24 @@ from trading_bot.utils.symbols import watchlist_symbols_from_args_or_config
 _DB_WRITE_LOCK = threading.Lock()
 
 
-def run_cycle(args: argparse.Namespace) -> int:
+def run_open_discovery_cycle(args: argparse.Namespace) -> int:
     started_at = datetime.now(UTC).isoformat()
     config, logger, db_path, kill_switch, notifier = bootstrap(args)
-    logger.info("Starting unified monitor-before-open run cycle")
+    logger.info("Starting new-open discovery cycle")
 
-    lock_handle = _acquire_run_cycle_lock(config, logger)
+    lock_handle = _acquire_bot_cycle_lock(config, logger)
     if lock_handle is None:
         record_bot_run(
             db_path,
             started_at=started_at,
             mode=config.mode,
             status="locked",
-            details={"command": "run-cycle", "reason": "another cycle is already running"},
+            details={"command": "open-discovery-cycle", "reason": "another cycle is already running"},
         )
         return 1
 
     try:
-        return _run_cycle_with_lock(
+        return _run_open_discovery_cycle_with_lock(
             args=args,
             config=config,
             logger=logger,
@@ -68,10 +67,10 @@ def run_cycle(args: argparse.Namespace) -> int:
             started_at=started_at,
         )
     finally:
-        _release_run_cycle_lock(lock_handle, logger)
+        _release_bot_cycle_lock(lock_handle, logger)
 
 
-def _run_cycle_with_lock(
+def _run_open_discovery_cycle_with_lock(
     *,
     args: argparse.Namespace,
     config,
@@ -83,7 +82,7 @@ def _run_cycle_with_lock(
     alpaca: AlpacaClient | None = None,
 ) -> int:
     if kill_switch.is_active():
-        logger.warning("Kill switch is active; monitoring continues, open execution remains blocked")
+        logger.warning("Kill switch is active; open execution remains blocked")
 
     if alpaca is None:
         try:
@@ -95,112 +94,73 @@ def _run_cycle_with_lock(
                 started_at=started_at,
                 mode=config.mode,
                 status="failed",
-                details={"command": "run-cycle", "error": str(exc)},
+                details={"command": "open-discovery-cycle", "error": str(exc)},
             )
             return 1
 
-    try:
-        monitor_result = monitor_put_credit_spreads(
-            config=config,
-            alpaca=alpaca,
-            option_feed=args.option_feed,
-        )
-    except Exception as exc:  # noqa: BLE001 - report broker/API errors cleanly in CLI
-        logger.exception("Run cycle position monitor failed: %s", exc)
-        record_bot_run(
-            db_path,
-            started_at=started_at,
-            mode=config.mode,
-            status="failed",
-            details={"command": "run-cycle", "phase": "monitor", "error": str(exc)},
-        )
-        return 1
-
-    _log_position_monitor_result(logger, monitor_result)
-    monitor_artifact = monitor_result.to_dict()
-    close_recommended_spreads = _close_recommended_spreads(monitor_artifact)
-    close_execution_attempts = _maybe_execute_recommended_closes(
-        config=config,
-        logger=logger,
-        db_path=db_path,
-        alpaca=alpaca,
-        kill_switch=kill_switch,
-        notifier=notifier,
-        monitor_artifact=monitor_artifact,
-        submit_requested=args.submit_paper_close,
-    )
     watchlist_artifact = None
     successful_count = 0
     skipped_open_reason = None
     account_risk_state = None
     cycle_status = "ok"
-    phase = "monitor_then_open"
+    phase = "open_discovery"
 
-    if close_recommended_spreads:
-        phase = "monitor_close_alert"
+    account_risk_state, account_risk_error = _build_pre_open_account_risk_state(
+        config=config,
+        logger=logger,
+        db_path=db_path,
+        alpaca=alpaca,
+    )
+    if account_risk_error:
+        phase = "open_account_risk_error"
+        skipped_open_reason = f"Account risk gate unavailable: {account_risk_error}"
+        cycle_status = "failed"
+        logger.error("Skipping new open decisions: %s", skipped_open_reason)
+    elif account_risk_state and account_risk_state.get("blocks_new_opens"):
+        phase = "open_account_risk_block"
         skipped_open_reason = (
-            f"{len(close_recommended_spreads)} existing spread(s) have close_recommended=true"
+            "Account risk gate blocked new opens: "
+            + "; ".join(str(reason) for reason in account_risk_state.get("block_reasons", []))
         )
-        cycle_status = "close_recommended"
+        cycle_status = "open_risk_blocked"
         logger.warning("Skipping new open decisions: %s", skipped_open_reason)
     else:
-        account_risk_state, account_risk_error = _build_pre_open_account_risk_state(
-            config=config,
-            logger=logger,
-            db_path=db_path,
-            alpaca=alpaca,
-        )
-        if account_risk_error:
-            phase = "monitor_account_risk_error"
-            skipped_open_reason = f"Account risk gate unavailable: {account_risk_error}"
+        symbols = watchlist_symbols_from_args_or_config(args, config)
+        if not symbols:
+            phase = "open_no_symbols"
+            skipped_open_reason = "No symbols configured for open discovery"
             cycle_status = "failed"
             logger.error("Skipping new open decisions: %s", skipped_open_reason)
-        elif account_risk_state and account_risk_state.get("blocks_new_opens"):
-            phase = "monitor_account_risk_block"
-            skipped_open_reason = (
-                "Account risk gate blocked new opens: "
-                + "; ".join(str(reason) for reason in account_risk_state.get("block_reasons", []))
-            )
-            cycle_status = "open_risk_blocked"
-            logger.warning("Skipping new open decisions: %s", skipped_open_reason)
         else:
-            symbols = watchlist_symbols_from_args_or_config(args, config)
-            if not symbols:
-                logger.error("No symbols configured for run cycle")
-                cycle_status = "failed"
-            else:
-                watchlist_artifact, successful_count = _build_watchlist_decision_run(
-                    config=config,
-                    logger=logger,
-                    db_path=db_path,
-                    kill_switch=kill_switch,
-                    notifier=notifier,
-                    alpaca=alpaca,
-                    symbols=symbols,
-                    max_candidates=args.max_candidates,
-                    option_feed=args.option_feed,
-                    mock_decision=args.mock_decision,
-                    submit_requested=args.submit_paper,
-                )
-                cycle_status = "ok" if successful_count else "failed"
+            watchlist_artifact, successful_count = _build_watchlist_decision_run(
+                config=config,
+                logger=logger,
+                db_path=db_path,
+                kill_switch=kill_switch,
+                notifier=notifier,
+                alpaca=alpaca,
+                symbols=symbols,
+                max_candidates=args.max_candidates,
+                option_feed=args.option_feed,
+                mock_decision=args.mock_decision,
+                submit_requested=args.submit_paper,
+            )
+            cycle_status = "ok" if successful_count else "failed"
 
-    cycle_artifact = _build_run_cycle_artifact(
+    cycle_artifact = _build_open_discovery_cycle_artifact(
         config=config,
         phase=phase,
-        monitor_artifact=monitor_artifact,
-        close_recommended_spreads=close_recommended_spreads,
-        close_execution_attempts=close_execution_attempts,
         watchlist_artifact=watchlist_artifact,
         skipped_open_reason=skipped_open_reason,
         account_risk_state=account_risk_state,
     )
 
     if args.json_output:
-        write_json_artifact(args.json_output, cycle_artifact, logger, "run cycle")
+        write_json_artifact(args.json_output, cycle_artifact, logger, "open discovery cycle")
 
     discord_ok = True
     if args.send_discord:
-        discord_ok = _send_run_cycle_summary(
+        discord_ok = _send_open_discovery_summary(
             notifier,
             cycle_artifact,
             logger,
@@ -214,17 +174,15 @@ def _run_cycle_with_lock(
         mode=config.mode,
         status=final_status,
         details={
-            "command": "run-cycle",
+            "command": "open-discovery-cycle",
             "phase": phase,
-            "close_recommended_count": len(close_recommended_spreads),
-            "close_execution_attempt_count": len(close_execution_attempts),
             "watchlist_successful_decision_count": successful_count,
             "account_risk_state": account_risk_state,
             "discord_requested": args.send_discord,
             "discord_ok": discord_ok,
         },
     )
-    return 0 if final_status in {"ok", "close_recommended", "open_risk_blocked"} else 1
+    return 0 if final_status in {"ok", "open_risk_blocked"} else 1
 
 
 def _build_pre_open_account_risk_state(
@@ -634,13 +592,10 @@ def _maybe_execute_recommended_closes(
     return attempts
 
 
-def _build_run_cycle_artifact(
+def _build_open_discovery_cycle_artifact(
     *,
     config,
     phase: str,
-    monitor_artifact: dict[str, Any],
-    close_recommended_spreads: list[dict[str, Any]],
-    close_execution_attempts: list[dict[str, Any]],
     watchlist_artifact: dict[str, Any] | None,
     skipped_open_reason: str | None,
     account_risk_state: dict[str, Any] | None = None,
@@ -648,12 +603,8 @@ def _build_run_cycle_artifact(
     return {
         "generated_at": datetime.now(UTC).isoformat(),
         "mode": config.mode,
-        "command": "run-cycle",
+        "command": "open-discovery-cycle",
         "phase": phase,
-        "monitor": monitor_artifact,
-        "close_recommended_count": len(close_recommended_spreads),
-        "close_recommended_spreads": close_recommended_spreads,
-        "close_execution_attempts": close_execution_attempts,
         "account_risk_state": account_risk_state,
         "skipped_open_decisions": bool(skipped_open_reason),
         "skip_open_reason": skipped_open_reason,
@@ -661,8 +612,8 @@ def _build_run_cycle_artifact(
     }
 
 
-def _acquire_run_cycle_lock(config, logger: logging.Logger) -> TextIO | None:
-    lock_path = resolve_path(config.get("runtime", "cycle_lock_path", default="data/run_cycle.lock"))
+def _acquire_bot_cycle_lock(config, logger: logging.Logger) -> TextIO | None:
+    lock_path = resolve_path(config.get("runtime", "cycle_lock_path", default="data/bot_cycle.lock"))
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     handle = lock_path.open("a+", encoding="utf-8")
     try:
@@ -673,7 +624,7 @@ def _acquire_run_cycle_lock(config, logger: logging.Logger) -> TextIO | None:
         handle.seek(0)
         existing = handle.read().strip()
         logger.error(
-            "Another run-cycle already holds lock %s%s",
+            "Another bot cycle already holds lock %s%s",
             lock_path,
             f" ({existing})" if existing else "",
         )
@@ -684,19 +635,19 @@ def _acquire_run_cycle_lock(config, logger: logging.Logger) -> TextIO | None:
     handle.truncate()
     handle.write(f"pid={os.getpid()} acquired_at={datetime.now(UTC).isoformat()}\n")
     handle.flush()
-    logger.info("Acquired run-cycle lock at %s", lock_path)
+    logger.info("Acquired bot cycle lock at %s", lock_path)
     return handle
 
 
-def _release_run_cycle_lock(handle: TextIO, logger: logging.Logger) -> None:
-    lock_path = getattr(handle, "name", "run-cycle lock")
+def _release_bot_cycle_lock(handle: TextIO, logger: logging.Logger) -> None:
+    lock_path = getattr(handle, "name", "bot cycle lock")
     try:
         import fcntl
 
         fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
     finally:
         handle.close()
-    logger.info("Released run-cycle lock at %s", lock_path)
+    logger.info("Released bot cycle lock at %s", lock_path)
 
 
 def _get_llm_or_mock_decision(

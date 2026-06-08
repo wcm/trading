@@ -137,7 +137,7 @@ storage:
 
 runtime:
   kill_switch_path: KILL_SWITCH
-  cycle_lock_path: data/run_cycle.lock
+  cycle_lock_path: data/bot_cycle.lock
   scheduler_interval_minutes: 1
   scheduler_open_interval_minutes: 5
   scheduler_heartbeat_minutes: 60

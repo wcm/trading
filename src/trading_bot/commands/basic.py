@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 
 from trading_bot.app import bootstrap
 from trading_bot.brokers.alpaca import AlpacaClient, AlpacaCredentialsError
-from trading_bot.cycles.run_cycle import (
+from trading_bot.cycles.open_discovery import (
     _build_decision_artifact,
     _build_watchlist_decision_run,
     _log_position_monitor_result,

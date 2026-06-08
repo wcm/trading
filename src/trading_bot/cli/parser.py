@@ -203,58 +203,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional path to write the daily summary artifact JSON.",
     )
 
-    cycle = subparsers.add_parser(
-        "run-cycle",
-        help="Run one monitor-before-open bot cycle.",
-    )
-    cycle.add_argument(
-        "--symbols",
-        help="Comma-separated symbols. Defaults to strategy.watchlist.",
-    )
-    cycle.add_argument(
-        "--max-candidates",
-        type=int,
-        default=20,
-        help="Maximum candidates to pass to each per-symbol LLM decision when opens are allowed.",
-    )
-    cycle.add_argument(
-        "--option-feed",
-        choices=["indicative", "opra"],
-        help="Override Alpaca option data feed for this cycle.",
-    )
-    cycle.add_argument(
-        "--send-discord",
-        action="store_true",
-        help="Send one Discord summary for the full cycle.",
-    )
-    cycle.add_argument(
-        "--discord-summary-only",
-        action="store_true",
-        help="Send only the compact cycle Discord summary, without per-symbol detail messages.",
-    )
-    cycle.add_argument(
-        "--json-output",
-        help="Optional path to write the combined cycle artifact JSON.",
-    )
-    cycle.add_argument(
-        "--mock-decision",
-        choices=["skip", "disable_trading"],
-        help="Use local mock decisions instead of calling OpenAI when opens are allowed.",
-    )
-    cycle.add_argument(
-        "--submit-paper",
-        action="store_true",
-        help="Request paper order submission for an allocator-selected open. Requires execution.enable_paper_orders=true.",
-    )
-    cycle.add_argument(
-        "--submit-paper-close",
-        action="store_true",
-        help="Request paper close order submission for recommended closes. Requires execution.enable_paper_close_orders=true.",
-    )
-
     scheduler = subparsers.add_parser(
         "schedule-local",
-        help="Run run-cycle repeatedly during US market hours.",
+        help="Run position monitoring every tick and new-open discovery on a slower cadence.",
     )
     scheduler.add_argument(
         "--symbols",
@@ -279,7 +230,7 @@ def build_parser() -> argparse.ArgumentParser:
     scheduler.add_argument(
         "--open-interval-minutes",
         type=float,
-        help="Minutes between new-open run-cycle decisions. Defaults to runtime.scheduler_open_interval_minutes.",
+        help="Minutes between new-open discovery runs. Defaults to runtime.scheduler_open_interval_minutes.",
     )
     scheduler.add_argument(
         "--heartbeat-minutes",
@@ -294,7 +245,7 @@ def build_parser() -> argparse.ArgumentParser:
     scheduler.add_argument(
         "--send-cycle-discord",
         action="store_true",
-        help="Also send each run-cycle's detailed Discord summary.",
+        help="Also send each new-open discovery Discord summary.",
     )
     scheduler.add_argument(
         "--cycle-summary-only",
@@ -303,7 +254,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     scheduler.add_argument(
         "--json-output-dir",
-        help="Optional directory for timestamped run-cycle JSON artifacts.",
+        help="Optional directory for timestamped scheduler JSON artifacts.",
     )
     scheduler.add_argument(
         "--skip-order-poll",

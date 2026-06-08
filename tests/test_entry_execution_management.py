@@ -6,7 +6,7 @@ import unittest
 from datetime import UTC, datetime
 
 from trading_bot.config import AppConfig, load_config
-from trading_bot.cycles.run_cycle import _revalidate_open_order_previews
+from trading_bot.cycles.open_discovery import _revalidate_open_order_previews
 from trading_bot.execution.entry_orders import manage_entry_order_after_submission
 from trading_bot.execution.revalidation import revalidate_put_credit_spread_entry_preview
 from trading_bot.execution.orders import build_put_credit_spread_order_preview

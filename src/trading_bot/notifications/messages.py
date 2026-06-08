@@ -44,7 +44,7 @@ def _send_scheduler_error(
 ) -> bool:
     content = (
         "Local scheduler error\n"
-        f"Phase: {phase}\n"
+        f"Where it happened: {phase}\n"
         f"Error: {error}"
     )
     result = notifier.send(content)
@@ -176,39 +176,21 @@ def _send_watchlist_decision_summary(
     return False
 
 
-def _send_run_cycle_summary(
+def _send_open_discovery_summary(
     notifier: DiscordNotifier,
     artifact: dict[str, Any],
     logger: logging.Logger,
     *,
     include_decision_details: bool = True,
 ) -> bool:
-    monitor = artifact.get("monitor") or {}
-    close_spreads = artifact.get("close_recommended_spreads") or []
     lines = [
-        "Bot run cycle complete",
-        f"Phase: {artifact.get('phase')}",
-        f"Option positions: {monitor.get('option_position_count')}",
-        f"Spreads: {monitor.get('spread_count')}",
-        f"Close recommendations: {artifact.get('close_recommended_count')}",
+        "New trade search complete",
+        f"What happened: {_open_discovery_human_status(artifact)}",
     ]
 
-    if close_spreads:
-        lines.append(f"Open decisions: skipped ({artifact.get('skip_open_reason')})")
-        lines.extend(_close_execution_status_lines(artifact.get("close_execution_attempts") or []))
-        for spread in close_spreads[:5]:
-            active_flags = [
-                flag for flag, active in (spread.get("exit_flags") or {}).items() if active
-            ]
-            lines.append(
-                f"- {spread.get('spread_id')}: close_debit={spread.get('close_debit')} "
-                f"pnl={spread.get('estimated_unrealized_pnl')} "
-                f"preview={_preview_status(spread.get('close_order_preview'))} "
-                f"flags={','.join(active_flags) or '-'}"
-            )
-    elif artifact.get("skipped_open_decisions"):
+    if artifact.get("skipped_open_decisions"):
         risk = artifact.get("account_risk_state") or {}
-        lines.append(f"Open decisions: skipped ({artifact.get('skip_open_reason')})")
+        lines.append(f"New trades: skipped ({artifact.get('skip_open_reason')})")
         if risk:
             lines.append(
                 "Account risk: "
@@ -217,37 +199,36 @@ def _send_run_cycle_summary(
                 f"{risk.get('max_new_trades_per_day')} "
                 f"blocks={len(risk.get('block_reasons') or [])}"
             )
-    else:
-        watchlist = artifact.get("watchlist_decision") or {}
-        allocation = watchlist.get("allocation") or {}
-        selected = allocation.get("selected_open")
-        selected_preview = watchlist.get("selected_order_preview")
-        execution_attempt = watchlist.get("execution_attempt")
-        selected_line = (
-            f"{selected['symbol']} {selected['candidate_id']} limit {selected['limit_price']} "
-            f"max_loss {selected['max_loss']}"
-            if selected
-            else "none"
-        )
-        lines.extend(
-            [
-                f"Open symbols: {', '.join(watchlist.get('symbols', []))}",
-                f"Accepted opens: {allocation.get('accepted_open_count')}",
-                f"Executable opens: {allocation.get('execution_eligible_open_count')}",
-                f"Selected open: {selected_line}",
-                f"Order preview: {_preview_status(selected_preview)}",
-                f"Execution: {_execution_status(execution_attempt)}",
-                f"Decision detail messages: {len(watchlist.get('per_symbol') or [])}",
-            ]
-        )
+        messages = ["\n".join(lines)]
+        return _send_discord_messages(notifier, messages, logger, "open-discovery summary")
+
+    watchlist = artifact.get("watchlist_decision") or {}
+    allocation = watchlist.get("allocation") or {}
+    selected = allocation.get("selected_open")
+    selected_preview = watchlist.get("selected_order_preview")
+    execution_attempt = watchlist.get("execution_attempt")
+    selected_line = (
+        f"{selected['symbol']} {selected['candidate_id']} limit {selected['limit_price']} "
+        f"max_loss {selected['max_loss']}"
+        if selected
+        else "none"
+    )
+    lines.extend(
+        [
+            f"Open symbols: {', '.join(watchlist.get('symbols', []))}",
+            f"Accepted opens: {allocation.get('accepted_open_count')}",
+            f"Executable opens: {allocation.get('execution_eligible_open_count')}",
+            f"Selected open: {selected_line}",
+            f"Order preview: {_preview_status(selected_preview)}",
+            f"Execution: {_execution_status(execution_attempt)}",
+            f"Decision detail messages: {len(watchlist.get('per_symbol') or [])}",
+        ]
+    )
 
     messages = ["\n".join(lines)]
-    if include_decision_details and not close_spreads and not artifact.get("skipped_open_decisions"):
-        messages.extend(_watchlist_decision_detail_messages(watchlist, heading="Run-cycle decision"))
-    if _send_discord_messages(notifier, messages, logger, "run-cycle summary"):
-        return True
-
-    return False
+    if include_decision_details:
+        messages.extend(_watchlist_decision_detail_messages(watchlist, heading="New-trade decision"))
+    return _send_discord_messages(notifier, messages, logger, "open-discovery summary")
 
 
 def _send_order_poll_summary(
@@ -504,3 +485,16 @@ def _send_position_monitor_summary(
 
     logger.error("Discord position monitor summary failed: %s", result.error)
     return False
+
+
+def _open_discovery_human_status(artifact: dict[str, Any]) -> str:
+    phase = artifact.get("phase")
+    if phase == "open_discovery":
+        return "Looked for new trades after the position monitor finished."
+    if phase == "open_account_risk_block":
+        return "Risk limits blocked new trades before the AI search."
+    if phase == "open_account_risk_error":
+        return "Could not safely check account risk, so new trades were skipped."
+    if phase == "open_no_symbols":
+        return "No symbols were configured for the new-trade search."
+    return str(phase or "completed")

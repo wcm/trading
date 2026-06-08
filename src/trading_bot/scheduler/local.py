@@ -8,11 +8,11 @@ from pathlib import Path
 
 from trading_bot.app import bootstrap
 from trading_bot.brokers.alpaca import AlpacaClient, AlpacaCredentialsError
-from trading_bot.cycles.run_cycle import (
+from trading_bot.cycles.open_discovery import (
     _close_recommended_spreads,
     _log_position_monitor_result,
     _maybe_execute_recommended_closes,
-    run_cycle,
+    run_open_discovery_cycle,
 )
 from trading_bot.monitoring.positions import monitor_put_credit_spreads
 from trading_bot.notifications.discord import DiscordNotifier
@@ -147,7 +147,9 @@ def run_local_scheduler(args: argparse.Namespace) -> int:
                             _send_scheduler_error(notifier, logger, phase="positions", error=str(exc))
 
                     open_due = tick_started >= next_open_decision_at
-                    if positions and not open_due:
+                    monitor_error = None
+                    monitor_status = None
+                    if positions:
                         try:
                             monitor_artifact = _run_scheduler_position_monitor(
                                 args=args,
@@ -160,6 +162,7 @@ def run_local_scheduler(args: argparse.Namespace) -> int:
                                 positions=positions,
                             )
                         except Exception as exc:  # noqa: BLE001 - scheduler should keep supervising
+                            monitor_error = str(exc)
                             error_count += 1
                             last_status = f"monitor_error: {exc}"
                             logger.exception("Scheduler position monitor failed: %s", exc)
@@ -175,41 +178,46 @@ def run_local_scheduler(args: argparse.Namespace) -> int:
                             close_alerted_spread_ids.update(close_ids)
                             if not close_ids:
                                 close_alerted_spread_ids.clear()
-                            last_status = (
+                            monitor_status = (
                                 f"monitor_ok spreads={monitor_artifact.get('spread_count')} "
                                 f"close_recommended={len(close_spreads)}"
                             )
+                            last_status = monitor_status
                     elif not positions and not position_error:
                         close_alerted_spread_ids.clear()
 
                     if open_due:
                         next_open_decision_at = tick_started + open_interval_minutes * 60
-                        if position_error:
-                            logger.warning("Skipping new open decision because position check failed")
+                        if position_error or monitor_error:
+                            reason = (
+                                "position check failed"
+                                if position_error
+                                else "position monitor failed"
+                            )
+                            logger.warning("Skipping new open decision because %s", reason)
                         else:
                             cycle_count += 1
-                            if positions:
-                                monitor_count += 1
                             cycle_json_output = _scheduler_cycle_json_output(args, now)
                             cycle_args = _scheduler_cycle_args(args, cycle_json_output)
                             logger.info(
-                                "Scheduler running open decision cycle %s json_output=%s cycle_discord=%s",
+                                "Scheduler running new-open discovery cycle %s json_output=%s cycle_discord=%s",
                                 cycle_count,
                                 cycle_json_output or "-",
                                 args.send_cycle_discord,
                             )
-                            cycle_code = run_cycle(cycle_args)
+                            cycle_code = run_open_discovery_cycle(cycle_args)
                             if cycle_code == 0:
-                                last_status = f"open_cycle_ok count={cycle_count}"
+                                open_status = f"open_discovery_ok count={cycle_count}"
+                                last_status = f"{monitor_status}; {open_status}" if monitor_status else open_status
                             else:
                                 error_count += 1
-                                last_status = f"open_cycle_failed code={cycle_code}"
+                                last_status = f"open_discovery_failed code={cycle_code}"
                                 if args.send_discord:
                                     _send_scheduler_error(
                                         notifier,
                                         logger,
-                                        phase="run-cycle",
-                                        error=f"run-cycle exited with code {cycle_code}",
+                                        phase="open-discovery",
+                                        error=f"open discovery exited with code {cycle_code}",
                                     )
                 else:
                     skipped_count += 1
@@ -543,7 +551,7 @@ def _scheduler_cycle_json_output(args: argparse.Namespace, now: datetime) -> str
         return None
     output_dir = resolve_path(args.json_output_dir)
     timestamp = now.strftime("%Y%m%dT%H%M%SZ")
-    return str(output_dir / f"run_cycle_{timestamp}.json")
+    return str(output_dir / f"open_discovery_{timestamp}.json")
 
 
 def _scheduler_daily_summary_json_output(args: argparse.Namespace, summary_date: date) -> str | None:
@@ -555,7 +563,7 @@ def _scheduler_daily_summary_json_output(args: argparse.Namespace, summary_date:
 
 def _scheduler_cycle_args(args: argparse.Namespace, json_output: str | None) -> argparse.Namespace:
     return argparse.Namespace(
-        command="run-cycle",
+        command="open-discovery-cycle",
         settings=args.settings,
         env=args.env,
         symbols=args.symbols,

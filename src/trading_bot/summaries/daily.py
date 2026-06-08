@@ -8,7 +8,7 @@ from typing import Any
 
 from trading_bot.app import bootstrap
 from trading_bot.brokers.alpaca import AlpacaClient, AlpacaCredentialsError
-from trading_bot.cycles.run_cycle import _close_recommended_spreads
+from trading_bot.cycles.open_discovery import _close_recommended_spreads
 from trading_bot.monitoring.positions import monitor_put_credit_spreads
 from trading_bot.notifications.messages import _send_daily_trading_summary
 from trading_bot.orders.lifecycle import _poll_order_status_changes
