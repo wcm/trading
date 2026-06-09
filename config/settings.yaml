@@ -129,7 +129,6 @@ notifications:
   webhook_env_var: DISCORD_WEBHOOK_URL
   required_for_execution: true
   stop_new_trades_on_repeated_failure: true
-  heartbeat_on_startup: true
   daily_summary: true
 
 storage:
@@ -140,7 +139,6 @@ runtime:
   cycle_lock_path: data/bot_cycle.lock
   scheduler_interval_minutes: 1
   scheduler_open_interval_minutes: 5
-  scheduler_heartbeat_minutes: 60
   scheduler_order_poll_limit: 50
   scheduler_daily_summary_time_et: "16:05"
   log_dir: logs

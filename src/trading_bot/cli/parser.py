@@ -233,14 +233,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Minutes between new-open discovery runs. Defaults to runtime.scheduler_open_interval_minutes.",
     )
     scheduler.add_argument(
-        "--heartbeat-minutes",
-        type=float,
-        help="Minutes between scheduler heartbeat messages. Defaults to runtime.scheduler_heartbeat_minutes.",
-    )
-    scheduler.add_argument(
         "--send-discord",
         action="store_true",
-        help="Send scheduler heartbeat and error messages.",
+        help="Send scheduler error, order, daily-summary, and close-recommendation messages.",
     )
     scheduler.add_argument(
         "--send-cycle-discord",

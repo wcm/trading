@@ -231,7 +231,7 @@ Discord remains the first notification provider.
 
 Shared notifications:
 
-- scheduler startup/heartbeat
+- scheduler error notifications
 - scheduler errors
 - account risk blocks
 - strategy run summaries

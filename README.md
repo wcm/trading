@@ -94,7 +94,7 @@ Run config/logging/storage checks:
 uv run trading-bot smoke
 ```
 
-Send a Discord heartbeat:
+Send a Discord test message:
 
 ```bash
 uv run trading-bot smoke --send-discord
@@ -184,8 +184,7 @@ uv run trading-bot daily-summary --send-discord --json-output data/daily_summary
 ```
 
 Run the local scheduler during US market hours. It defaults to one scheduler
-check every 1 minute, one new-open decision cycle every 5 minutes, and one
-heartbeat every 60 minutes:
+check every 1 minute and one new-open decision cycle every 5 minutes:
 
 ```bash
 uv run trading-bot schedule-local --send-discord --json-output-dir data/scheduler_cycles

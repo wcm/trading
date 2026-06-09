@@ -35,7 +35,7 @@ class DiscordNotifier:
         try:
             response = httpx.post(
                 self.webhook_url,
-                json={"content": content, "username": "Trading Bot"},
+                json={"content": content},
                 timeout=self.timeout_seconds,
             )
             response.raise_for_status()
@@ -48,4 +48,3 @@ class DiscordNotifier:
             return NotificationResult(ok=False, error=f"Discord webhook failed: {exc}")
 
         return NotificationResult(ok=True)
-

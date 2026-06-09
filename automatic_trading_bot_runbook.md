@@ -469,7 +469,7 @@ scp -i ~/.ssh/do_trading_bot -r root@DROPLET_IP:/opt/trading/data/scheduler_cycl
 Before market open:
 
 - `docker compose ps` shows the bot is up.
-- Discord startup heartbeat was received.
+- Discord error/order/daily-summary notifications are configured.
 - `docker compose logs -f trading-bot` shows off-hours sleep until next open.
 - Local scheduler is not running.
 

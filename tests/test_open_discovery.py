@@ -21,6 +21,7 @@ from trading_bot.notifications.messages import (
     _send_daily_trading_summary,
     _send_open_discovery_summary,
     _send_order_poll_summary,
+    _send_position_monitor_summary,
     _send_watchlist_decision_summary,
 )
 from trading_bot.scheduler.local import (
@@ -30,7 +31,6 @@ from trading_bot.scheduler.local import (
     _scheduler_daily_summary_due_date,
     _scheduler_daily_summary_json_output,
     _scheduler_daily_summary_time_et,
-    _scheduler_heartbeat_minutes,
     _scheduler_interval_minutes,
     _scheduler_open_interval_minutes,
     _scheduler_order_poll_limit,
@@ -120,8 +120,6 @@ class OpenDiscoveryTests(unittest.TestCase):
                 "1",
                 "--open-interval-minutes",
                 "5",
-                "--heartbeat-minutes",
-                "30",
                 "--send-discord",
                 "--send-cycle-discord",
                 "--cycle-summary-only",
@@ -143,7 +141,6 @@ class OpenDiscoveryTests(unittest.TestCase):
         self.assertEqual(args.symbols, "AAPL,MSFT")
         self.assertEqual(args.interval_minutes, 1)
         self.assertEqual(args.open_interval_minutes, 5)
-        self.assertEqual(args.heartbeat_minutes, 30)
         self.assertTrue(args.send_discord)
         self.assertTrue(args.send_cycle_discord)
         self.assertTrue(args.cycle_summary_only)
@@ -213,7 +210,6 @@ class OpenDiscoveryTests(unittest.TestCase):
 
         self.assertEqual(_scheduler_interval_minutes(args, config), 1)
         self.assertEqual(_scheduler_open_interval_minutes(args, config), 5)
-        self.assertEqual(_scheduler_heartbeat_minutes(args, config), 60)
         self.assertEqual(_scheduler_order_poll_limit(args, config), 50)
         self.assertEqual(_scheduler_daily_summary_time_et(args, config).strftime("%H:%M"), "16:05")
 
@@ -386,11 +382,59 @@ class OpenDiscoveryTests(unittest.TestCase):
 
         self.assertTrue(ok)
         self.assertEqual(len(notifier.messages), 1)
-        self.assertIn("New trade search complete", notifier.messages[0])
-        self.assertIn("What happened: Risk limits blocked", notifier.messages[0])
-        self.assertIn("New trades: skipped", notifier.messages[0])
-        self.assertIn("Account risk:", notifier.messages[0])
+        self.assertIn("# New Trade Skipped", notifier.messages[0])
+        self.assertIn("**Reason:** Daily P&L -600 breaches", notifier.messages[0])
+        self.assertIn("**Daily P&L:** -600.00", notifier.messages[0])
         self.assertNotIn("Phase:", notifier.messages[0])
+
+    def test_position_monitor_sends_only_close_recommendations(self) -> None:
+        notifier = FakeNotifier()
+        artifact = {
+            "option_position_count": 2,
+            "spread_count": 1,
+            "unpaired_legs": [],
+            "spreads": [
+                {
+                    "spread_id": "AAPL-2026-06-12-305P-300P",
+                    "underlying_symbol": "AAPL",
+                    "short_strike": "305",
+                    "long_strike": "300",
+                    "close_recommended": True,
+                    "close_debit": "0.40",
+                    "exit_flags": {"profit_target_hit": True},
+                }
+            ],
+        }
+
+        ok = _send_position_monitor_summary(notifier, artifact, logging.getLogger("test"))
+
+        self.assertTrue(ok)
+        self.assertEqual(len(notifier.messages), 1)
+        self.assertIn("# Order Close Recommendation", notifier.messages[0])
+        self.assertIn("**AAPL 305/300P**", notifier.messages[0])
+        self.assertIn("**Price:** 0.40", notifier.messages[0])
+        self.assertIn("**Reason:** profit target reached", notifier.messages[0])
+
+    def test_position_monitor_stays_quiet_without_close_recommendations(self) -> None:
+        notifier = FakeNotifier()
+        artifact = {
+            "option_position_count": 2,
+            "spread_count": 1,
+            "unpaired_legs": [],
+            "spreads": [
+                {
+                    "spread_id": "AAPL-2026-06-12-305P-300P",
+                    "close_recommended": False,
+                    "close_debit": "0.80",
+                    "exit_flags": {},
+                }
+            ],
+        }
+
+        ok = _send_position_monitor_summary(notifier, artifact, logging.getLogger("test"))
+
+        self.assertTrue(ok)
+        self.assertEqual(notifier.messages, [])
 
     def test_watchlist_discord_sends_full_decision_reason_in_detail_message(self) -> None:
         reason = "This is a long decision reason. " * 12
@@ -401,7 +445,8 @@ class OpenDiscoveryTests(unittest.TestCase):
 
         self.assertTrue(ok)
         self.assertEqual(len(notifier.messages), 2)
-        self.assertIn("Decision detail messages: 1", notifier.messages[0])
+        self.assertIn("# Watchlist Decision", notifier.messages[0])
+        self.assertIn("**Selected:** none", notifier.messages[0])
         self.assertNotIn(reason, notifier.messages[0])
         self.assertIn(reason, notifier.messages[1])
 
@@ -420,23 +465,80 @@ class OpenDiscoveryTests(unittest.TestCase):
 
         self.assertTrue(ok)
         self.assertGreater(len(notifier.messages), 2)
-        self.assertIn("Decision detail messages: 1", notifier.messages[0])
+        self.assertIn("# New Trade Search", notifier.messages[0])
+        self.assertIn("**Selected:** none", notifier.messages[0])
         self.assertIn(reason, "".join(notifier.messages[1:]))
 
-    def test_order_poll_discord_sends_all_changes(self) -> None:
+    def test_order_poll_discord_sends_simple_order_event_messages(self) -> None:
+        open_order = {
+            "id": "open-order-1",
+            "client_order_id": "preview-aapl-001",
+            "symbol": "",
+            "status": "filled",
+            "filled_qty": "1",
+            "filled_avg_price": "-1.05",
+            "qty": "1",
+            "order_class": "mleg",
+            "legs": [
+                {"symbol": "AAPL260612P00305000", "position_intent": "sell_to_open"},
+                {"symbol": "AAPL260612P00300000", "position_intent": "buy_to_open"},
+            ],
+        }
+        close_order = {
+            "id": "close-order-1",
+            "client_order_id": "close-preview-aapl-001",
+            "symbol": "",
+            "status": "filled",
+            "filled_qty": "1",
+            "filled_avg_price": "0.40",
+            "qty": "1",
+            "order_class": "mleg",
+            "legs": [
+                {"symbol": "AAPL260612P00305000", "position_intent": "buy_to_close"},
+                {"symbol": "AAPL260612P00300000", "position_intent": "sell_to_close"},
+            ],
+        }
         changes = [
             {
-                "broker_order_id": f"order-{index}",
-                "client_order_id": f"client-{index}",
-                "symbol": "AAPL",
+                "broker_order_id": "open-order-1",
+                "client_order_id": "preview-aapl-001",
+                "symbol": "",
                 "previous_status": "new",
                 "status": "filled",
                 "previous_filled_qty": "0",
                 "filled_qty": "1",
                 "qty": "1",
                 "order_class": "mleg",
-            }
-            for index in range(12)
+                "raw_order": open_order,
+            },
+            {
+                "broker_order_id": "close-order-1",
+                "client_order_id": "close-preview-aapl-001",
+                "symbol": "",
+                "previous_status": "new",
+                "status": "filled",
+                "previous_filled_qty": "0",
+                "filled_qty": "1",
+                "qty": "1",
+                "order_class": "mleg",
+                "raw_order": close_order,
+            },
+            {
+                "broker_order_id": "rejected-order-1",
+                "client_order_id": "preview-msft-001",
+                "symbol": "MSFT",
+                "previous_status": "new",
+                "status": "rejected",
+                "raw_order": {"symbol": "MSFT", "status": "rejected", "reject_reason": "buying power"},
+            },
+            {
+                "broker_order_id": "canceled-order-1",
+                "client_order_id": "preview-nvda-001",
+                "symbol": "NVDA",
+                "previous_status": "new",
+                "status": "canceled",
+                "raw_order": {"symbol": "NVDA", "status": "canceled", "limit_price": "0.80"},
+            },
         ]
         notifier = FakeNotifier()
 
@@ -452,10 +554,19 @@ class OpenDiscoveryTests(unittest.TestCase):
         )
 
         self.assertTrue(ok)
+        self.assertEqual(len(notifier.messages), 4)
         content = "\n".join(notifier.messages)
-        self.assertIn("Changes: 12", content)
-        self.assertIn("order-0", content)
-        self.assertIn("order-11", content)
+        self.assertIn("# Orders Filled", content)
+        self.assertIn("**AAPL 305/300P**", content)
+        self.assertIn("**Price:** 1.05", content)
+        self.assertIn("# Orders Closed", content)
+        self.assertIn("**Price:** 0.40", content)
+        self.assertIn("# Orders Rejected", content)
+        self.assertIn("**MSFT**", content)
+        self.assertIn("**Reason:** buying power", content)
+        self.assertIn("# Orders Canceled", content)
+        self.assertIn("**NVDA**", content)
+        self.assertNotIn("Orders polled", content)
 
     def test_daily_trading_summary_discord_focuses_on_pnl_positions_orders(self) -> None:
         notifier = FakeNotifier()
@@ -503,10 +614,11 @@ class OpenDiscoveryTests(unittest.TestCase):
 
         self.assertTrue(ok)
         content = "\n".join(notifier.messages)
-        self.assertIn("daily P&L: 500.00", content)
-        self.assertIn("Open positions: broker=2 option=2 spreads=1", content)
-        self.assertIn("Estimated open spread P&L: 65.00", content)
-        self.assertIn("Order event statuses: filled=1, new=1", content)
+        self.assertIn("# Daily Summary", content)
+        self.assertIn("**Daily P&L:** 500.00", content)
+        self.assertIn("**Spreads:** 1", content)
+        self.assertIn("**Estimated open P&L:** 65.00", content)
+        self.assertIn("**Statuses:** filled=1, new=1", content)
         self.assertNotIn("LLM", content)
 
 

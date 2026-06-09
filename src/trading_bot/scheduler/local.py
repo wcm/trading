@@ -21,7 +21,6 @@ from trading_bot.notifications.messages import (
     _send_order_poll_summary,
     _send_position_monitor_summary,
     _send_scheduler_error,
-    _send_scheduler_heartbeat,
 )
 from trading_bot.orders.lifecycle import _poll_order_status_changes
 from trading_bot.risk.kill_switch import KillSwitch
@@ -36,7 +35,6 @@ def run_local_scheduler(args: argparse.Namespace) -> int:
     config, logger, db_path, kill_switch, notifier = bootstrap(args)
     interval_minutes = _scheduler_interval_minutes(args, config)
     open_interval_minutes = _scheduler_open_interval_minutes(args, config)
-    heartbeat_minutes = _scheduler_heartbeat_minutes(args, config)
     try:
         daily_summary_time = _scheduler_daily_summary_time_et(args, config)
     except ValueError as exc:
@@ -47,9 +45,6 @@ def run_local_scheduler(args: argparse.Namespace) -> int:
         return 1
     if open_interval_minutes <= 0:
         logger.error("Scheduler open interval must be positive: %s", open_interval_minutes)
-        return 1
-    if heartbeat_minutes < 0:
-        logger.error("Scheduler heartbeat interval cannot be negative: %s", heartbeat_minutes)
         return 1
 
     try:
@@ -62,11 +57,10 @@ def run_local_scheduler(args: argparse.Namespace) -> int:
     logger.info(
         (
             "Starting local scheduler interval_minutes=%s open_interval_minutes=%s "
-            "heartbeat_minutes=%s once=%s ignore_market_hours=%s"
+            "once=%s ignore_market_hours=%s"
         ),
         interval_minutes,
         open_interval_minutes,
-        heartbeat_minutes,
         args.once,
         args.ignore_market_hours,
     )
@@ -79,7 +73,6 @@ def run_local_scheduler(args: argparse.Namespace) -> int:
             "command": "schedule-local",
             "interval_minutes": interval_minutes,
             "open_interval_minutes": open_interval_minutes,
-            "heartbeat_minutes": heartbeat_minutes,
             "daily_summary_time_et": daily_summary_time.strftime("%H:%M"),
             "once": args.once,
             "ignore_market_hours": args.ignore_market_hours,
@@ -89,19 +82,6 @@ def run_local_scheduler(args: argparse.Namespace) -> int:
         },
     )
 
-    if args.send_discord:
-        _send_scheduler_heartbeat(
-            notifier,
-            logger,
-            status="started",
-            interval_minutes=interval_minutes,
-            heartbeat_minutes=heartbeat_minutes,
-            details=(
-                f"open_interval={open_interval_minutes:g}m cycle_discord={args.send_cycle_discord} "
-                f"daily_summary={not args.skip_daily_summary} once={args.once}"
-            ),
-        )
-
     cycle_count = 0
     monitor_count = 0
     skipped_count = 0
@@ -109,7 +89,6 @@ def run_local_scheduler(args: argparse.Namespace) -> int:
     daily_summary_count = 0
     error_count = 0
     last_status = "started"
-    next_heartbeat_at = time.monotonic() + heartbeat_minutes * 60 if heartbeat_minutes > 0 else None
     next_open_decision_at = 0.0
     daily_summary_sent_dates: set[str] = set()
     close_alerted_spread_ids: set[str] = set()
@@ -330,25 +309,6 @@ def run_local_scheduler(args: argparse.Namespace) -> int:
             if args.once:
                 break
 
-            if (
-                args.send_discord
-                and next_heartbeat_at is not None
-                and time.monotonic() >= next_heartbeat_at
-            ):
-                _send_scheduler_heartbeat(
-                    notifier,
-                    logger,
-                    status="running",
-                    interval_minutes=interval_minutes,
-                    heartbeat_minutes=heartbeat_minutes,
-                    details=(
-                        f"{last_status}; open_cycles={cycle_count}; monitors={monitor_count}; "
-                        f"skipped={skipped_count}; order_changes={order_change_count}; "
-                        f"daily_summaries={daily_summary_count}; errors={error_count}"
-                    ),
-                )
-                next_heartbeat_at = time.monotonic() + heartbeat_minutes * 60
-
             time.sleep(sleep_seconds)
     except KeyboardInterrupt:
         last_status = "stopped_by_keyboard_interrupt"
@@ -373,19 +333,6 @@ def run_local_scheduler(args: argparse.Namespace) -> int:
             "last_status": last_status,
         },
     )
-    if args.send_discord:
-        _send_scheduler_heartbeat(
-            notifier,
-            logger,
-            status="stopped" if not args.once else "completed once",
-            interval_minutes=interval_minutes,
-            heartbeat_minutes=heartbeat_minutes,
-            details=(
-                f"{last_status}; open_cycles={cycle_count}; monitors={monitor_count}; "
-                f"skipped={skipped_count}; order_changes={order_change_count}; "
-                f"daily_summaries={daily_summary_count}; errors={error_count}"
-            ),
-        )
     return 0 if error_count == 0 else 1
 
 
@@ -434,12 +381,6 @@ def _scheduler_open_interval_minutes(args: argparse.Namespace, config) -> float:
     if args.open_interval_minutes is not None:
         return float(args.open_interval_minutes)
     return float(config.get("runtime", "scheduler_open_interval_minutes", default=5))
-
-
-def _scheduler_heartbeat_minutes(args: argparse.Namespace, config) -> float:
-    if args.heartbeat_minutes is not None:
-        return float(args.heartbeat_minutes)
-    return float(config.get("runtime", "scheduler_heartbeat_minutes", default=60))
 
 
 def _scheduler_order_poll_limit(args: argparse.Namespace, config) -> int:
