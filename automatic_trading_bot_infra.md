@@ -1,6 +1,6 @@
 # Automatic Trading Bot Infrastructure Plan
 
-Last updated: 2026-06-07
+Last updated: 2026-06-10
 Status: Cloud paper trading, shared-infrastructure design in progress
 
 This document describes the shared infrastructure for the automatic trading bot.
@@ -57,7 +57,7 @@ Important current operating posture:
 
 - `mode: paper`
 - `risk.max_open_risk`: USD 5,000 aggregate paper open risk
-- `risk.max_new_trades_per_day`: 3
+- `risk.max_new_trades_per_day`: 1
 - `risk.max_daily_loss`: USD 500
 - `risk.max_weekly_loss`: USD 1,000
 - Scheduler tick: 1 minute
@@ -263,7 +263,7 @@ strategies:
     module: trading_bot.strategy.put_credit_spread
     open_interval_minutes: 5
     max_open_risk: 5000
-    max_new_trades_per_day: 3
+    max_new_trades_per_day: 1
     watchlist:
       - QQQ
       - AAPL
@@ -372,7 +372,7 @@ Near-term infrastructure work:
 
 Later infrastructure work:
 
-- Add broad-market regime filter shared by strategies.
+- Generalize broad-market regime filters across future strategies.
 - Add external earnings/calendar provider.
 - Add risk-pause mode when no positions/orders need supervision.
 - Add strategy performance reports.

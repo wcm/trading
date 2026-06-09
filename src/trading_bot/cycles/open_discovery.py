@@ -715,13 +715,20 @@ def _build_decision_artifact(
         candidates_by_id=candidate_dicts_by_id(scan_result),
         allowed_symbols=set(symbols),
         open_position_symbols={str(position.get("symbol")) for position in positions if position.get("symbol")},
+        market_context=packet_dict["market_context"],
         market_context_by_symbol=packet_dict["market_context"]["symbols"],
         event_context_by_symbol=packet_dict["event_context"]["symbols"],
+        broad_market_symbol=config.get("market_filters", "broad_market_symbol"),
+        require_broad_market_above_ma=bool(
+            config.get("market_filters", "require_broad_market_above_30m_ma", default=True)
+        ),
         max_loss_per_trade=config.get("risk", "max_loss_per_trade"),
         max_option_quote_age_seconds=int(
             config.get("market_filters", "max_option_quote_age_minutes", default=30)
         )
         * 60,
+        min_short_put_distance_pct=config.get("strategy", "min_short_put_distance_pct"),
+        min_open_confidence=config.get("decision_engine", "min_open_confidence"),
     )
     with _DB_WRITE_LOCK:
         decision_id = record_llm_decision(

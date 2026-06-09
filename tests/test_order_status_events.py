@@ -281,7 +281,7 @@ class OrderStatusEventTests(unittest.TestCase):
                 orders=[open_spread_order_payload()],
             )
             open_trades = list_spread_trades(db_path, mode="paper", status="open")
-            record_order_status_changes(
+            close_changes = record_order_status_changes(
                 db_path,
                 observed_at="2026-06-04T15:01:00+00:00",
                 mode="paper",
@@ -296,6 +296,10 @@ class OrderStatusEventTests(unittest.TestCase):
         self.assertEqual(len(closed_trades), 1)
         self.assertEqual(closed_trades[0]["close_debit"], "0.4")
         self.assertEqual(closed_trades[0]["status"], "closed")
+        self.assertEqual(len(close_changes), 1)
+        self.assertEqual(close_changes[0]["spread_trade"]["entry_credit"], "1.05")
+        self.assertEqual(close_changes[0]["spread_trade"]["close_debit"], "0.4")
+        self.assertEqual(close_changes[0]["spread_trade"]["realized_pnl"], "65")
 
     def test_backfills_spread_trade_when_filled_order_status_is_unchanged(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -51,6 +51,8 @@ DECISION_RESPONSE_JSON_SCHEMA: dict[str, Any] = {
                 "earnings_ok",
                 "no_material_negative_news",
                 "market_trend_ok",
+                "broad_market_ok",
+                "short_put_distance_ok",
             ],
             "properties": {
                 "defined_risk": {"type": "boolean"},
@@ -59,6 +61,8 @@ DECISION_RESPONSE_JSON_SCHEMA: dict[str, Any] = {
                 "earnings_ok": {"type": "boolean"},
                 "no_material_negative_news": {"type": "boolean"},
                 "market_trend_ok": {"type": "boolean"},
+                "broad_market_ok": {"type": "boolean"},
+                "short_put_distance_ok": {"type": "boolean"},
             },
         },
         "exit_plan": {
@@ -84,8 +88,13 @@ def validate_decision_payload(
     open_position_symbols: set[str] | None = None,
     market_context_by_symbol: dict[str, dict[str, Any]] | None = None,
     event_context_by_symbol: dict[str, dict[str, Any]] | None = None,
+    market_context: dict[str, Any] | None = None,
+    broad_market_symbol: str | None = None,
+    require_broad_market_above_ma: bool = True,
     max_loss_per_trade: str | int | float | None = None,
     max_option_quote_age_seconds: int | None = None,
+    min_short_put_distance_pct: str | int | float | None = None,
+    min_open_confidence: str | int | float | None = None,
 ) -> list[str]:
     errors: list[str] = []
 
@@ -113,6 +122,8 @@ def validate_decision_payload(
     confidence = payload.get("confidence")
     if not isinstance(confidence, (int, float)) or not (0 <= confidence <= 1):
         errors.append("confidence must be a number between 0 and 1")
+    elif action == "open":
+        _validate_open_confidence(confidence, min_open_confidence, errors)
 
     candidate_id = payload.get("candidate_id")
     if action == "open":
@@ -130,6 +141,13 @@ def validate_decision_payload(
             event_context_by_symbol,
             max_loss_per_trade,
             max_option_quote_age_seconds,
+            min_short_put_distance_pct,
+            errors,
+        )
+        _validate_open_broad_market_context(
+            market_context,
+            broad_market_symbol,
+            require_broad_market_above_ma,
             errors,
         )
     elif quantity not in (0, None):
@@ -187,6 +205,7 @@ def _validate_open_candidate_context(
     event_context_by_symbol: dict[str, dict[str, Any]] | None,
     max_loss_per_trade: str | int | float | None,
     max_option_quote_age_seconds: int | None,
+    min_short_put_distance_pct: str | int | float | None,
     errors: list[str],
 ) -> None:
     candidate_id = payload.get("candidate_id")
@@ -201,6 +220,16 @@ def _validate_open_candidate_context(
 
     if candidate.get("liquidity_ok") is not True:
         errors.append("Candidate liquidity_ok is not true")
+
+    min_distance = _decimal_or_none(min_short_put_distance_pct)
+    if min_distance is not None and min_distance > 0:
+        candidate_distance = _decimal_or_none(candidate.get("short_put_distance_pct"))
+        if candidate_distance is None:
+            errors.append("Candidate short put distance is unavailable")
+        elif candidate_distance < min_distance:
+            errors.append(
+                f"Candidate short put distance {candidate_distance} is below minimum {min_distance}%"
+            )
 
     if max_loss_per_trade is not None:
         candidate_max_loss = _decimal_or_none(candidate.get("max_loss"))
@@ -242,6 +271,51 @@ def _validate_open_candidate_context(
         errors.append(f"Event context is unavailable for {candidate_symbol}")
     elif event_context.get("earnings_ok") is not True:
         errors.append(f"Earnings/event filter is not passing for {candidate_symbol}")
+
+
+def _validate_open_confidence(
+    confidence: int | float,
+    min_open_confidence: str | int | float | None,
+    errors: list[str],
+) -> None:
+    minimum = _decimal_or_none(min_open_confidence)
+    if minimum is None:
+        return
+    confidence_decimal = _decimal_or_none(confidence)
+    if confidence_decimal is None:
+        return
+    if confidence_decimal < minimum:
+        errors.append(f"Open confidence {confidence_decimal} is below minimum {minimum}")
+
+
+def _validate_open_broad_market_context(
+    market_context: dict[str, Any] | None,
+    broad_market_symbol: str | None,
+    require_broad_market_above_ma: bool,
+    errors: list[str],
+) -> None:
+    symbol = str(broad_market_symbol or "").strip().upper()
+    if not symbol:
+        return
+    if not isinstance(market_context, dict):
+        errors.append("Broad market context is unavailable")
+        return
+
+    symbols = market_context.get("symbols")
+    if not isinstance(symbols, dict):
+        errors.append("Broad market symbols context is unavailable")
+        return
+    broad_context = symbols.get(symbol)
+    if not isinstance(broad_context, dict):
+        errors.append(f"Broad market context is unavailable for {symbol}")
+        return
+
+    if broad_context.get("latest_bar_fresh") is not True:
+        errors.append(f"Broad market latest bar is not fresh for {symbol}")
+    if broad_context.get("block_intraday_down") is not False:
+        errors.append(f"Broad market intraday down filter is not passing for {symbol}")
+    if require_broad_market_above_ma and broad_context.get("above_trend_ma") is not True:
+        errors.append(f"Broad market moving-average filter is not passing for {symbol}")
 
 
 def _validate_nested_objects(payload: dict[str, Any], errors: list[str]) -> None:

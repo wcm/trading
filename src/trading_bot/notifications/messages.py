@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from decimal import Decimal
 from typing import Any
 
 from trading_bot.monitoring.positions import parse_occ_option_symbol
@@ -470,7 +471,7 @@ def _order_event_messages(changes: list[dict[str, Any]]) -> list[str]:
     if groups["filled"]:
         messages.append(_simple_order_message("# Orders Filled", groups["filled"]))
     if groups["closed"]:
-        messages.append(_simple_order_message("# Orders Closed", groups["closed"]))
+        messages.append(_simple_order_message("# Orders Closed", groups["closed"], include_pnl=True))
     if groups["rejected"]:
         messages.append(_simple_order_message("# Orders Rejected", groups["rejected"], include_reason=True))
     if groups["canceled"]:
@@ -498,10 +499,15 @@ def _simple_order_message(
     changes: list[dict[str, Any]],
     *,
     include_reason: bool = False,
+    include_pnl: bool = False,
 ) -> str:
     lines = [title]
     for change in changes:
         lines.extend(["", f"**{_order_label(change)}**", f"**Price:** {_order_price(change)}"])
+        if include_pnl:
+            realized_pnl = _order_realized_pnl(change)
+            if realized_pnl is not None:
+                lines.append(f"**P&L:** {_format_signed_decimal(realized_pnl)}")
         if include_reason:
             lines.append(f"**Reason:** {_order_reject_reason(change)}")
     return "\n".join(lines)
@@ -603,6 +609,30 @@ def _order_reject_reason(change: dict[str, Any]) -> str:
         or raw_order.get("reason")
         or "not provided"
     )
+
+
+def _order_realized_pnl(change: dict[str, Any]) -> Decimal | None:
+    spread_trade = change.get("spread_trade")
+    if not isinstance(spread_trade, dict):
+        return None
+    realized = decimal_or_none(spread_trade.get("realized_pnl"))
+    if realized is not None:
+        return realized
+    entry = decimal_or_none(spread_trade.get("entry_credit"))
+    close = decimal_or_none(spread_trade.get("close_debit"))
+    quantity = decimal_or_none(spread_trade.get("quantity"))
+    if entry is None or close is None or quantity is None:
+        return None
+    return (entry - close) * Decimal("100") * quantity
+
+
+def _format_signed_decimal(value: Decimal) -> str:
+    formatted = format_optional_decimal(value)
+    if formatted is None:
+        return "-"
+    if value > 0:
+        return f"+{formatted}"
+    return formatted
 
 
 def _spread_label(spread: dict[str, Any]) -> str:

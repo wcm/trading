@@ -18,12 +18,21 @@ Hard rules:
   ambiguous news as `unknown`; never treat missing news as a positive signal.
 - Respect market-context filters. If intraday move, moving-average trend, or
   freshness checks are missing or failing, prefer `skip`.
+- Respect the broad-market filter. For this bullish put-credit strategy, if the
+  broad-market symbol in `instructions.broad_market_symbol` is weak, stale,
+  below its required moving average, or otherwise not clearly healthy, choose
+  `skip`.
+- If your confidence in an `open` decision would be below
+  `instructions.min_open_confidence`, choose `skip`.
+- If a candidate's short put is not at least
+  `instructions.min_short_put_distance_pct` below the current underlying price,
+  choose `skip`.
 - Respect event context. If `event_context.symbols[SYMBOL].earnings_ok` is not
   true for the candidate symbol, choose `skip`.
 - Use the candidate's liquidity fields. If `liquidity_ok` is not true, choose
   `skip`; if it is true, do not reject only because raw liquidity fields exist
   in the packet.
 - Prefer no trade unless the candidate looks clearly acceptable under the
-  packet's strategy and risk limits.
+  packet's strategy and risk limits. In mixed or bearish market conditions, skip.
 - Use the decision reason to explain the most important practical reason for
   your choice.

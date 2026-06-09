@@ -522,6 +522,13 @@ class OpenDiscoveryTests(unittest.TestCase):
                 "qty": "1",
                 "order_class": "mleg",
                 "raw_order": close_order,
+                "spread_trade": {
+                    "spread_id": "AAPL-2026-06-12-305P-300P",
+                    "entry_credit": "1.05",
+                    "close_debit": "0.40",
+                    "quantity": 1,
+                    "realized_pnl": "65.00",
+                },
             },
             {
                 "broker_order_id": "rejected-order-1",
@@ -561,6 +568,7 @@ class OpenDiscoveryTests(unittest.TestCase):
         self.assertIn("**Price:** 1.05", content)
         self.assertIn("# Orders Closed", content)
         self.assertIn("**Price:** 0.40", content)
+        self.assertIn("**P&L:** +65.00", content)
         self.assertIn("# Orders Rejected", content)
         self.assertIn("**MSFT**", content)
         self.assertIn("**Reason:** buying power", content)

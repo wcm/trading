@@ -423,9 +423,12 @@ def record_order_status_changes(
                 "expired_at": _string_or_none(order.get("expired_at")),
                 "raw_order": order,
             }
-            changes.append(change)
             if status == "filled":
                 _record_spread_trade_fill(conn, mode=mode, order=order, observed_at=observed_at)
+                spread_trade = _spread_trade_for_close_order(conn, mode=mode, order=order)
+                if spread_trade:
+                    change["spread_trade"] = spread_trade
+            changes.append(change)
         conn.commit()
     return changes
 
@@ -815,6 +818,84 @@ def _mark_spread_trade_closed(
             payload["long_put_symbol"],
         ),
     )
+
+
+def _spread_trade_for_close_order(
+    conn: sqlite3.Connection,
+    *,
+    mode: str,
+    order: dict[str, Any],
+) -> dict[str, Any] | None:
+    broker_order_id = _string_or_none(order.get("id"))
+    client_order_id = _string_or_none(order.get("client_order_id"))
+    clauses = []
+    params: list[Any] = [mode]
+    if broker_order_id:
+        clauses.append("close_order_id = ?")
+        params.append(broker_order_id)
+    if client_order_id:
+        clauses.append("close_client_order_id = ?")
+        params.append(client_order_id)
+    if not clauses:
+        return None
+
+    row = conn.execute(
+        f"""
+        SELECT
+            spread_id,
+            underlying_symbol,
+            short_strike,
+            long_strike,
+            quantity,
+            entry_credit,
+            close_debit,
+            max_loss,
+            status,
+            opened_at,
+            closed_at
+        FROM spread_trades
+        WHERE mode = ? AND ({' OR '.join(clauses)})
+        ORDER BY closed_at DESC, id DESC
+        LIMIT 1
+        """,
+        tuple(params),
+    ).fetchone()
+    if row is None:
+        return None
+
+    realized_pnl = _realized_spread_pnl(
+        entry_credit=row[5],
+        close_debit=row[6],
+        quantity=row[4],
+    )
+    return {
+        "spread_id": row[0],
+        "underlying_symbol": row[1],
+        "short_strike": row[2],
+        "long_strike": row[3],
+        "quantity": row[4],
+        "entry_credit": row[5],
+        "close_debit": row[6],
+        "max_loss": row[7],
+        "status": row[8],
+        "opened_at": row[9],
+        "closed_at": row[10],
+        "realized_pnl": _fmt_optional_decimal(realized_pnl),
+    }
+
+
+def _realized_spread_pnl(
+    *,
+    entry_credit: Any,
+    close_debit: Any,
+    quantity: Any,
+) -> Decimal | None:
+    entry = _decimal_or_none(entry_credit)
+    close = _decimal_or_none(close_debit)
+    qty = _decimal_or_none(quantity)
+    if entry is None or close is None or qty is None:
+        return None
+    return (entry - close) * Decimal("100") * qty
 
 
 def _spread_order_payload(order: dict[str, Any]) -> dict[str, Any] | None:

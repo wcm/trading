@@ -72,23 +72,23 @@ class FakeAlpacaClient:
     ) -> list[dict[str, Any]]:
         return [
             {
-                "symbol": "AAPL260619P00095000",
+                "symbol": "AAPL260626P00095000",
                 "underlying_symbol": "AAPL",
                 "type": "put",
                 "status": "active",
                 "tradable": True,
-                "expiration_date": "2026-06-19",
+                "expiration_date": "2026-06-26",
                 "strike_price": "95",
                 "open_interest": "1000",
                 "open_interest_date": "2026-06-03",
             },
             {
-                "symbol": "AAPL260619P00090000",
+                "symbol": "AAPL260626P00090000",
                 "underlying_symbol": "AAPL",
                 "type": "put",
                 "status": "active",
                 "tradable": True,
-                "expiration_date": "2026-06-19",
+                "expiration_date": "2026-06-26",
                 "strike_price": "90",
                 "open_interest": "250",
                 "open_interest_date": "2026-06-03",
@@ -103,13 +103,13 @@ class FakeAlpacaClient:
         chunk_size: int = 100,
     ) -> dict[str, dict[str, Any]]:
         return {
-            "AAPL260619P00095000": {
+            "AAPL260626P00095000": {
                 "latestQuote": {"bp": "1.50", "ap": "1.60", "t": "2026-06-03T14:00:00Z"},
-                "greeks": {"delta": "-0.25", "gamma": "0.01", "theta": "-0.02", "vega": "0.10"},
+                "greeks": {"delta": "-0.15", "gamma": "0.01", "theta": "-0.02", "vega": "0.10"},
             },
-            "AAPL260619P00090000": {
+            "AAPL260626P00090000": {
                 "latestQuote": {"bp": "0.31", "ap": "0.35", "t": "2026-06-03T14:00:00Z"},
-                "greeks": {"delta": "-0.15", "gamma": "0.01", "theta": "-0.01", "vega": "0.08"},
+                "greeks": {"delta": "-0.08", "gamma": "0.01", "theta": "-0.01", "vega": "0.08"},
             },
         }
 
@@ -132,9 +132,27 @@ class PutCreditSpreadScanTests(unittest.TestCase):
         self.assertEqual(candidate.underlying_symbol, "AAPL")
         self.assertEqual(candidate.net_credit, "1.15")
         self.assertEqual(candidate.max_loss, "385.00")
+        self.assertEqual(candidate.short_put_distance_pct, "5.00")
         self.assertTrue(candidate.liquidity_ok)
         self.assertEqual(candidate.short_open_interest, 1000)
         self.assertEqual(candidate.long_open_interest, 250)
+
+    def test_scan_rejects_short_put_too_close_to_underlying_price(self) -> None:
+        class CloseStrikeAlpacaClient(FakeAlpacaClient):
+            def get_latest_stock_bars(self, symbols: list[str], *, feed: str = "iex") -> dict[str, Any]:
+                return {symbol: {"c": "96.00"} for symbol in symbols}
+
+        config = load_config("config/settings.yaml")
+        result = scan_put_credit_spreads(
+            config=config,
+            alpaca=CloseStrikeAlpacaClient(),
+            symbols=["AAPL"],
+            max_candidates=5,
+            option_feed="indicative",
+        )
+
+        self.assertEqual(result.candidates, [])
+        self.assertTrue(any("delta/distance/liquidity/credit" in warning for warning in result.warnings))
 
 
 if __name__ == "__main__":

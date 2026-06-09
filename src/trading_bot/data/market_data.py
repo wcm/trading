@@ -40,10 +40,16 @@ class SymbolMarketContext:
 class MarketContext:
     generated_at: str
     symbols: dict[str, SymbolMarketContext]
+    broad_market_symbol: str | None
+    broad_market_filter_ok: bool | None
+    broad_market_warnings: list[str]
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "generated_at": self.generated_at,
+            "broad_market_symbol": self.broad_market_symbol,
+            "broad_market_filter_ok": self.broad_market_filter_ok,
+            "broad_market_warnings": self.broad_market_warnings,
             "symbols": {symbol: context.to_dict() for symbol, context in self.symbols.items()},
         }
 
@@ -64,11 +70,27 @@ def build_market_context(
     trend_timeframe = str(config.get("market_filters", "trend_timeframe", default="30Min"))
     trend_period = int(config.get("market_filters", "require_above_30m_ma_period", default=20))
     trend_lookback_days = int(config.get("market_filters", "trend_lookback_days", default=14))
-    down_threshold = _decimal_or_none(config.get("market_filters", "block_if_underlying_down_intraday_pct", default=2.5))
+    underlying_down_threshold = _decimal_or_none(
+        config.get("market_filters", "block_if_underlying_down_intraday_pct", default=0.75)
+    )
+    broad_market_symbol = _symbol_or_none(config.get("market_filters", "broad_market_symbol", default=None))
+    broad_down_threshold = _decimal_or_none(
+        config.get(
+            "market_filters",
+            "block_if_broad_market_down_intraday_pct",
+            default=underlying_down_threshold,
+        )
+    )
+    require_broad_above_ma = bool(
+        config.get("market_filters", "require_broad_market_above_30m_ma", default=True)
+    )
     max_bar_age_minutes = int(config.get("market_filters", "max_bar_age_minutes", default=30))
+    context_symbols = _dedupe_symbols(
+        symbols + ([broad_market_symbol] if broad_market_symbol else [])
+    )
 
     intraday_bars = alpaca.get_stock_bars(
-        symbols,
+        context_symbols,
         timeframe=intraday_timeframe,
         start=market_open.astimezone(UTC).isoformat(),
         feed=feed,
@@ -76,7 +98,7 @@ def build_market_context(
         sort="asc",
     )
     trend_bars = alpaca.get_stock_bars(
-        symbols,
+        context_symbols,
         timeframe=trend_timeframe,
         start=(now - timedelta(days=trend_lookback_days)).isoformat(),
         feed=feed,
@@ -85,7 +107,12 @@ def build_market_context(
     )
 
     contexts: dict[str, SymbolMarketContext] = {}
-    for symbol in symbols:
+    for symbol in context_symbols:
+        down_threshold = (
+            broad_down_threshold
+            if broad_market_symbol and symbol == broad_market_symbol
+            else underlying_down_threshold
+        )
         contexts[symbol] = _build_symbol_context(
             symbol=symbol,
             feed=feed,
@@ -98,7 +125,27 @@ def build_market_context(
             max_bar_age_seconds=max_bar_age_minutes * 60,
         )
 
-    return MarketContext(generated_at=now.isoformat(), symbols=contexts)
+    broad_market_warnings: list[str] = []
+    broad_market_filter_ok = None
+    if broad_market_symbol:
+        broad_context = contexts.get(broad_market_symbol)
+        if broad_context is None:
+            broad_market_filter_ok = False
+            broad_market_warnings.append(f"Broad market context is unavailable for {broad_market_symbol}.")
+        else:
+            broad_market_filter_ok = _broad_market_filter_ok(
+                broad_context,
+                require_above_ma=require_broad_above_ma,
+            )
+            broad_market_warnings.extend(broad_context.warnings)
+
+    return MarketContext(
+        generated_at=now.isoformat(),
+        symbols=contexts,
+        broad_market_symbol=broad_market_symbol,
+        broad_market_filter_ok=broad_market_filter_ok,
+        broad_market_warnings=broad_market_warnings,
+    )
 
 
 def _build_symbol_context(
@@ -199,6 +246,35 @@ def _age_seconds(now: datetime, timestamp: datetime | None) -> int | None:
     if -60 <= age < 0:
         return 0
     return age
+
+
+def _broad_market_filter_ok(context: SymbolMarketContext, *, require_above_ma: bool) -> bool:
+    if context.latest_bar_fresh is not True:
+        return False
+    if context.block_intraday_down is not False:
+        return False
+    if require_above_ma and context.above_trend_ma is not True:
+        return False
+    return True
+
+
+def _dedupe_symbols(symbols: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for raw_symbol in symbols:
+        symbol = _symbol_or_none(raw_symbol)
+        if not symbol or symbol in seen:
+            continue
+        seen.add(symbol)
+        result.append(symbol)
+    return result
+
+
+def _symbol_or_none(value: Any) -> str | None:
+    if value is None:
+        return None
+    symbol = str(value).strip().upper()
+    return symbol or None
 
 
 def _decimal_or_none(value: Any) -> Decimal | None:

@@ -76,6 +76,12 @@ def build_decision_packet(
             "no_trade_is_valid": True,
             "limit_price_for_credit_spread_must_be_negative": True,
             "max_quantity": 1,
+            "min_open_confidence": config.get("decision_engine", "min_open_confidence", default=0.80),
+            "min_short_put_distance_pct": config.get("strategy", "min_short_put_distance_pct", default=0),
+            "broad_market_symbol": config.get("market_filters", "broad_market_symbol", default=None),
+            "require_broad_market_filter": bool(
+                config.get("market_filters", "broad_market_symbol", default=None)
+            ),
         },
     )
 

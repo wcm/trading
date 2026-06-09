@@ -44,6 +44,7 @@ class PutCreditSpreadCandidate:
     long_put_symbol: str
     short_strike: str
     long_strike: str
+    short_put_distance_pct: str | None
     width: str
     net_credit: str
     max_profit: str
@@ -96,8 +97,8 @@ def scan_put_credit_spreads(
     now = datetime.now(UTC)
     market_date = datetime.now(ZoneInfo("America/New_York")).date()
 
-    min_dte = int(config.get("strategy", "min_dte", default=7))
-    max_dte = int(config.get("strategy", "max_dte", default=21))
+    min_dte = int(config.get("strategy", "min_dte", default=14))
+    max_dte = int(config.get("strategy", "max_dte", default=30))
     min_expiration = market_date.toordinal() + min_dte
     max_expiration = market_date.toordinal() + max_dte
 
@@ -138,8 +139,11 @@ def scan_put_credit_spreads(
     width_values = [_decimal_or_none(width) for width in config.get("strategy", "spread_widths", default=[5, 10])]
     widths = [width for width in width_values if width is not None and width > 0]
     min_credit_pct = _decimal_or_none(config.get("strategy", "min_credit_as_width_pct", default=0.20)) or Decimal("0.20")
-    short_delta_min = _decimal_or_none(config.get("strategy", "short_put_delta_min", default=-0.30)) or Decimal("-0.30")
-    short_delta_max = _decimal_or_none(config.get("strategy", "short_put_delta_max", default=-0.20)) or Decimal("-0.20")
+    short_delta_min = _decimal_or_none(config.get("strategy", "short_put_delta_min", default=-0.18)) or Decimal("-0.18")
+    short_delta_max = _decimal_or_none(config.get("strategy", "short_put_delta_max", default=-0.10)) or Decimal("-0.10")
+    min_short_put_distance_pct = _decimal_or_none(
+        config.get("strategy", "min_short_put_distance_pct", default=0)
+    ) or Decimal("0")
     min_short_open_interest = _int_or_none(
         config.get("liquidity", "min_short_leg_open_interest", default=0)
     )
@@ -159,6 +163,13 @@ def scan_put_credit_spreads(
             continue
         if not (short_delta_min <= short_leg.delta <= short_delta_max):
             continue
+        short_put_distance_pct = _short_put_distance_pct(
+            underlying_prices.get(underlying),
+            strike,
+        )
+        if min_short_put_distance_pct > 0:
+            if short_put_distance_pct is None or short_put_distance_pct < min_short_put_distance_pct:
+                continue
 
         for width in widths:
             long_strike = strike - width
@@ -197,6 +208,7 @@ def scan_put_credit_spreads(
                     long_put_symbol=long_leg.symbol,
                     short_strike=_fmt_decimal(strike),
                     long_strike=_fmt_decimal(long_strike),
+                    short_put_distance_pct=_fmt_optional_decimal(short_put_distance_pct),
                     width=_fmt_decimal(width),
                     net_credit=_fmt_decimal(net_credit),
                     max_profit=_fmt_decimal(max_profit),
@@ -223,7 +235,9 @@ def scan_put_credit_spreads(
 
     candidates.sort(key=lambda candidate: (Decimal(candidate.max_loss), -Decimal(candidate.net_credit)))
     if not candidates:
-        warnings.append("No put credit spread candidates passed the current delta/liquidity/credit filters.")
+        warnings.append(
+            "No put credit spread candidates passed the current delta/distance/liquidity/credit filters."
+        )
 
     return PutCreditSpreadScanResult(
         scanned_at=now.isoformat(),
@@ -321,6 +335,12 @@ def _liquidity_ok(
                 return False
 
     return True
+
+
+def _short_put_distance_pct(underlying_price: Decimal | None, short_strike: Decimal) -> Decimal | None:
+    if underlying_price is None or underlying_price <= 0:
+        return None
+    return ((underlying_price - short_strike) / underlying_price) * Decimal("100")
 
 
 def _nested_get(mapping: dict[str, Any], *keys: str) -> Any:

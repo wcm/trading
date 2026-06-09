@@ -31,8 +31,10 @@ def valid_skip_decision() -> dict:
             "within_max_loss": True,
             "liquidity_ok": True,
             "earnings_ok": True,
-            "no_material_negative_news": False,
+            "no_material_negative_news": True,
             "market_trend_ok": True,
+            "broad_market_ok": True,
+            "short_put_distance_ok": True,
         },
         "exit_plan": {
             "profit_take_credit_pct": 50,
@@ -258,6 +260,152 @@ class LlmDecisionTests(unittest.TestCase):
         )
         self.assertTrue(any("news risk_level is high" in error for error in errors))
         self.assertTrue(any("news sentiment is negative" in error for error in errors))
+
+    def test_validator_rejects_open_below_min_confidence(self) -> None:
+        config = load_config("config/settings.yaml")
+        scan = scan_put_credit_spreads(
+            config=config,
+            alpaca=FakeAlpacaClient(),
+            symbols=["AAPL"],
+            max_candidates=5,
+            option_feed="indicative",
+        )
+        candidate = scan.candidates[0]
+        decision = valid_skip_decision()
+        decision.update(
+            {
+                "action": "open",
+                "symbol": "AAPL",
+                "candidate_id": candidate.candidate_id,
+                "quantity": 1,
+                "limit_price": "-1.00",
+                "confidence": 0.79,
+            }
+        )
+
+        errors = validate_decision_payload(
+            decision,
+            candidate_ids=packet_candidate_ids(scan),
+            candidates_by_id=candidate_dicts_by_id(scan),
+            allowed_symbols={"AAPL"},
+            market_context_by_symbol={
+                "AAPL": {
+                    "latest_bar_fresh": True,
+                    "market_trend_ok": True,
+                }
+            },
+            event_context_by_symbol={
+                "AAPL": {
+                    "earnings_ok": True,
+                }
+            },
+            max_loss_per_trade="500",
+            max_option_quote_age_seconds=86_400,
+            min_short_put_distance_pct="3.0",
+            min_open_confidence="0.80",
+        )
+
+        self.assertTrue(any("below minimum 0.80" in error for error in errors))
+
+    def test_validator_rejects_open_when_short_put_distance_is_too_close(self) -> None:
+        config = load_config("config/settings.yaml")
+        scan = scan_put_credit_spreads(
+            config=config,
+            alpaca=FakeAlpacaClient(),
+            symbols=["AAPL"],
+            max_candidates=5,
+            option_feed="indicative",
+        )
+        candidate = scan.candidates[0].to_dict()
+        candidate["short_put_distance_pct"] = "1.00"
+        decision = valid_skip_decision()
+        decision.update(
+            {
+                "action": "open",
+                "symbol": "AAPL",
+                "candidate_id": candidate["candidate_id"],
+                "quantity": 1,
+                "limit_price": "-1.00",
+            }
+        )
+
+        errors = validate_decision_payload(
+            decision,
+            candidate_ids={candidate["candidate_id"]},
+            candidates_by_id={candidate["candidate_id"]: candidate},
+            allowed_symbols={"AAPL"},
+            market_context_by_symbol={
+                "AAPL": {
+                    "latest_bar_fresh": True,
+                    "market_trend_ok": True,
+                }
+            },
+            event_context_by_symbol={
+                "AAPL": {
+                    "earnings_ok": True,
+                }
+            },
+            max_loss_per_trade="500",
+            max_option_quote_age_seconds=86_400,
+            min_short_put_distance_pct="3.0",
+        )
+
+        self.assertTrue(any("short put distance 1.00 is below minimum 3.0%" in error for error in errors))
+
+    def test_validator_rejects_open_when_broad_market_filter_fails(self) -> None:
+        config = load_config("config/settings.yaml")
+        scan = scan_put_credit_spreads(
+            config=config,
+            alpaca=FakeAlpacaClient(),
+            symbols=["AAPL"],
+            max_candidates=5,
+            option_feed="indicative",
+        )
+        candidate = scan.candidates[0]
+        decision = valid_skip_decision()
+        decision.update(
+            {
+                "action": "open",
+                "symbol": "AAPL",
+                "candidate_id": candidate.candidate_id,
+                "quantity": 1,
+                "limit_price": "-1.00",
+            }
+        )
+
+        errors = validate_decision_payload(
+            decision,
+            candidate_ids=packet_candidate_ids(scan),
+            candidates_by_id=candidate_dicts_by_id(scan),
+            allowed_symbols={"AAPL"},
+            market_context={
+                "symbols": {
+                    "QQQ": {
+                        "latest_bar_fresh": True,
+                        "block_intraday_down": True,
+                        "above_trend_ma": True,
+                    }
+                }
+            },
+            market_context_by_symbol={
+                "AAPL": {
+                    "latest_bar_fresh": True,
+                    "market_trend_ok": True,
+                }
+            },
+            event_context_by_symbol={
+                "AAPL": {
+                    "earnings_ok": True,
+                }
+            },
+            broad_market_symbol="QQQ",
+            max_loss_per_trade="500",
+            max_option_quote_age_seconds=86_400,
+            min_short_put_distance_pct="3.0",
+            min_open_confidence="0.80",
+        )
+
+        self.assertTrue(any("Broad market intraday down filter is not passing for QQQ" in error for error in errors))
 
 
 if __name__ == "__main__":

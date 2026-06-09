@@ -27,7 +27,7 @@ risk:
   max_loss_per_trade: 1000
   max_open_risk: 5000
   max_open_positions: 50
-  max_new_trades_per_day: 3
+  max_new_trades_per_day: 1
   max_daily_loss: 500
   max_weekly_loss: 1000
   disable_after_first_paper_trade: false
@@ -48,10 +48,11 @@ strategy:
     - QQQ
     - AAPL
     - MSFT
-  min_dte: 7
-  max_dte: 21
-  short_put_delta_min: -0.30
-  short_put_delta_max: -0.20
+  min_dte: 14
+  max_dte: 30
+  short_put_delta_min: -0.18
+  short_put_delta_max: -0.10
+  min_short_put_distance_pct: 3.0
   spread_widths:
     - 5
     - 10
@@ -67,7 +68,10 @@ liquidity:
   max_leg_spread_absolute: 0.50
 
 market_filters:
-  block_if_underlying_down_intraday_pct: 2.5
+  block_if_underlying_down_intraday_pct: 0.75
+  broad_market_symbol: QQQ
+  block_if_broad_market_down_intraday_pct: 0.75
+  require_broad_market_above_30m_ma: true
   require_above_30m_ma_period: 20
   block_earnings_within_days: 7
   intraday_timeframe: 1Min
@@ -96,6 +100,7 @@ decision_engine:
   model: gpt-5.5
   reasoning_effort: medium
   max_concurrent_symbols: 8
+  min_open_confidence: 0.80
   openai_base_url: https://api.openai.com/v1
   prompt_version: put_credit_spread_v1
   temperature: 0
