@@ -198,8 +198,9 @@ still a known gap.
 ## 4. Normal Cloud Update Workflow
 
 Use this workflow for code changes and `config/settings.yaml` changes.
-The update script deploys from GitHub. It does not deploy uncommitted local
-files.
+The update script normally deploys from GitHub. If the VPS cannot pull GitHub
+directly, it automatically falls back to sending a local Git bundle over SSH.
+It does not deploy uncommitted local files.
 
 On the local Mac:
 
@@ -217,7 +218,8 @@ The script:
 
 - checks your local git tree is clean and pushed to `origin/main`;
 - SSHes to the VPS;
-- pulls latest code in `/opt/trading`;
+- tries to pull latest code in `/opt/trading`;
+- falls back to a local Git bundle if the VPS cannot access GitHub;
 - rebuilds/restarts Docker Compose;
 - prints container status and recent logs.
 
@@ -233,8 +235,20 @@ Useful variants:
 deploy/update-cloud.sh --smoke
 deploy/update-cloud.sh --follow-logs
 deploy/update-cloud.sh --no-build
+deploy/update-cloud.sh --no-bundle-fallback
 deploy/update-cloud.sh --tail-lines 300
 ```
+
+The bundle fallback is useful when GitHub says this on the VPS:
+
+```text
+git@github.com: Permission denied (publickey).
+fatal: Could not read from remote repository.
+```
+
+The more permanent infrastructure fix is to add a read-only GitHub deploy key
+for the VPS. The script fallback means deployment still works before that key is
+set up.
 
 For config-only changes, Docker rebuild is not strictly necessary because
 `config/settings.yaml` is mounted into the container. This is enough if you are

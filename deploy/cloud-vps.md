@@ -69,6 +69,10 @@ deploy/update-cloud.sh
 Use `deploy/update-cloud.sh --host root@DROPLET_IP` if the `trading-bot-vps`
 SSH alias is not configured.
 
+The script first tries to pull from GitHub on the VPS. If GitHub SSH access is
+not set up on the VPS, it automatically sends a local Git bundle over SSH and
+fast-forwards `/opt/trading` from that bundle.
+
 Inspect logs:
 
 ```bash

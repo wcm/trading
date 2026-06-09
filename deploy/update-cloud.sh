@@ -6,12 +6,14 @@ usage() {
 Usage:
   deploy/update-cloud.sh [options]
 
-Update and restart the cloud paper-trading bot from GitHub.
+Update and restart the cloud paper-trading bot.
 
 Default behavior:
   - Checks the local git tree is clean and pushed to origin/main.
   - SSHes to the VPS.
-  - Pulls latest origin/main in /opt/trading.
+  - Tries to pull latest origin/main in /opt/trading.
+  - If the VPS cannot pull GitHub directly, sends a local Git bundle and
+    fast-forwards /opt/trading from that bundle.
   - Rebuilds/restarts Docker Compose.
   - Prints container status and recent logs.
 
@@ -19,6 +21,8 @@ Options:
   --host HOST          SSH host or alias. Default: trading-bot-vps
   --remote-dir DIR    Repo path on VPS. Default: /opt/trading
   --branch BRANCH     Git branch to deploy. Default: main
+  --no-bundle-fallback
+                       Fail instead of using a local Git bundle if remote pull fails.
   --no-build          Restart without Docker rebuild.
   --smoke             Run Docker smoke test before restart.
   --follow-logs       Follow logs after restart. Ctrl+C stops log viewing only.
@@ -41,6 +45,7 @@ run_smoke=0
 follow_logs=0
 tail_lines=120
 skip_local_check=0
+bundle_fallback=1
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -55,6 +60,10 @@ while [[ $# -gt 0 ]]; do
     --branch)
       branch="${2:-}"
       shift 2
+      ;;
+    --no-bundle-fallback)
+      bundle_fallback=0
+      shift
       ;;
     --no-build)
       run_build=0
@@ -98,6 +107,14 @@ if ! [[ "$tail_lines" =~ ^[0-9]+$ ]]; then
   exit 2
 fi
 
+if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  echo "Run this script from inside the local trading bot git repo." >&2
+  exit 1
+fi
+
+local_head="$(git rev-parse "$branch")"
+local_short_head="$(git rev-parse --short "$branch")"
+
 if [[ "$skip_local_check" -eq 0 ]] && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   if [[ -n "$(git status --porcelain)" ]]; then
     echo "Local working tree has uncommitted changes." >&2
@@ -106,7 +123,6 @@ if [[ "$skip_local_check" -eq 0 ]] && git rev-parse --is-inside-work-tree >/dev/
   fi
 
   git fetch origin "$branch" >/dev/null
-  local_head="$(git rev-parse "$branch")"
   remote_head="$(git rev-parse "origin/$branch")"
   if [[ "$local_head" != "$remote_head" ]]; then
     echo "Local $branch is not the same as origin/$branch." >&2
@@ -120,8 +136,9 @@ printf 'Deploying %s to %s:%s\n' "$branch" "$host" "$remote_dir"
 remote_dir_q="$(printf '%q' "$remote_dir")"
 branch_q="$(printf '%q' "$branch")"
 
-ssh "$host" \
-  "REMOTE_DIR=$remote_dir_q BRANCH=$branch_q RUN_BUILD=$run_build RUN_SMOKE=$run_smoke FOLLOW_LOGS=$follow_logs TAIL_LINES=$tail_lines bash -s" <<'REMOTE'
+remote_git_update() {
+  ssh "$host" \
+    "REMOTE_DIR=$remote_dir_q BRANCH=$branch_q bash -s" <<'REMOTE'
 set -euo pipefail
 
 cd "$REMOTE_DIR"
@@ -131,6 +148,49 @@ echo "Fetching origin/${BRANCH}"
 git fetch origin "$BRANCH"
 git checkout "$BRANCH"
 git pull --ff-only origin "$BRANCH"
+git status -sb
+git log -1 --oneline
+REMOTE
+}
+
+bundle_update() {
+  safe_branch="$(printf '%s' "$branch" | tr -c '[:alnum:]._-' '-')"
+  bundle_file="$(mktemp "${TMPDIR:-/tmp}/trading-bot-${safe_branch}-${local_short_head}.XXXXXX.bundle")"
+  remote_bundle="/tmp/trading-bot-${safe_branch}-${local_short_head}.bundle"
+  trap 'rm -f "$bundle_file"' EXIT
+
+  echo "Creating local Git bundle for ${branch} at ${local_short_head}"
+  git bundle create "$bundle_file" "$branch"
+
+  echo "Copying bundle to ${host}:${remote_bundle}"
+  scp "$bundle_file" "${host}:${remote_bundle}"
+
+  remote_bundle_q="$(printf '%q' "$remote_bundle")"
+  ssh "$host" \
+    "REMOTE_DIR=$remote_dir_q BRANCH=$branch_q REMOTE_BUNDLE=$remote_bundle_q bash -s" <<'REMOTE'
+set -euo pipefail
+
+cd "$REMOTE_DIR"
+
+echo "Remote repo: $(pwd)"
+echo "Fetching ${BRANCH} from uploaded bundle"
+git fetch "$REMOTE_BUNDLE" "$BRANCH:refs/remotes/origin/$BRANCH"
+git checkout "$BRANCH"
+git merge --ff-only "refs/remotes/origin/$BRANCH"
+rm -f "$REMOTE_BUNDLE"
+git status -sb
+git log -1 --oneline
+REMOTE
+  rm -f "$bundle_file"
+  trap - EXIT
+}
+
+restart_remote() {
+  ssh "$host" \
+    "REMOTE_DIR=$remote_dir_q RUN_BUILD=$run_build RUN_SMOKE=$run_smoke FOLLOW_LOGS=$follow_logs TAIL_LINES=$tail_lines bash -s" <<'REMOTE'
+set -euo pipefail
+
+cd "$REMOTE_DIR"
 
 if [[ "$RUN_SMOKE" == "1" ]]; then
   echo "Running Docker smoke test"
@@ -154,3 +214,16 @@ else
   docker compose logs --tail "$TAIL_LINES" trading-bot
 fi
 REMOTE
+}
+
+if remote_git_update; then
+  echo "Remote GitHub pull succeeded"
+elif [[ "$bundle_fallback" == "1" ]]; then
+  echo "Remote GitHub pull failed; falling back to local Git bundle deploy"
+  bundle_update
+else
+  echo "Remote GitHub pull failed and bundle fallback is disabled." >&2
+  exit 1
+fi
+
+restart_remote
