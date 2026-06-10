@@ -5,7 +5,9 @@ import logging
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import replace
 from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, TextIO
 
@@ -14,7 +16,7 @@ from trading_bot.app import bootstrap
 from trading_bot.brokers.alpaca import AlpacaClient, AlpacaCredentialsError
 from trading_bot.data.events import build_event_context
 from trading_bot.data.market_data import build_market_context
-from trading_bot.data.news import build_news_context
+from trading_bot.data.news import NewsContext, build_news_context
 from trading_bot.execution.gate import maybe_submit_paper_close_order, maybe_submit_paper_order
 from trading_bot.execution.orders import build_client_order_id, build_put_credit_spread_order_preview
 from trading_bot.execution.revalidation import revalidate_put_credit_spread_entry_preview
@@ -279,6 +281,7 @@ def _build_watchlist_decision_run(
             per_symbol.append(entry)
 
     successful_decisions = [item for item in per_symbol if item.get("decision")]
+    llm_call_count = len([item for item in per_symbol if item.get("llm_called") is True])
     allocation = build_allocation_summary(config, decision_artifacts)
     selected_order_preview = _selected_order_preview(decision_artifacts, allocation.get("selected_open"))
     execution_attempt = None
@@ -335,6 +338,7 @@ def _build_watchlist_decision_run(
         "mode": config.mode,
         "symbols": symbols,
         "per_symbol": per_symbol,
+        "llm_call_count": llm_call_count,
         "open_revalidation": open_revalidation,
         "allocation": allocation,
         "selected_order_preview": selected_order_preview,
@@ -344,9 +348,10 @@ def _build_watchlist_decision_run(
     }
 
     logger.info(
-        "Watchlist decision complete: symbols=%s successful=%s accepted_opens=%s selected=%s",
+        "Watchlist decision complete: symbols=%s successful=%s llm_calls=%s accepted_opens=%s selected=%s",
         len(symbols),
         len(successful_decisions),
+        llm_call_count,
         allocation["accepted_open_count"],
         (allocation["selected_open"] or {}).get("candidate_id"),
     )
@@ -685,7 +690,6 @@ def _build_decision_artifact(
     open_orders = alpaca.get_orders(status="open")
     market_context = build_market_context(config=config, alpaca=alpaca, symbols=symbols)
     event_context = build_event_context(config=config, symbols=symbols)
-    news_context = build_news_context(config=config, alpaca=alpaca, symbols=symbols)
     scan_result = scan_put_credit_spreads(
         config=config,
         alpaca=alpaca,
@@ -696,13 +700,57 @@ def _build_decision_artifact(
 
     with _DB_WRITE_LOCK:
         record_option_scan(db_path, mode=config.mode, scan_result=scan_result)
+    filtered_scan_result, pre_llm_filter = _apply_pre_llm_filters(
+        config=config,
+        symbols=symbols,
+        scan_result=scan_result,
+        market_context=market_context.to_dict(),
+        event_context=event_context.to_dict(),
+    )
+    if pre_llm_filter["eligible_candidate_count"] == 0:
+        reason = _pre_llm_skip_reason(pre_llm_filter)
+        news_context = _empty_news_context(
+            config=config,
+            symbols=symbols,
+            warning="News was not fetched because hard pre-LLM filters blocked this symbol.",
+        )
+        packet = build_decision_packet(
+            config=config,
+            account=account,
+            clock=clock,
+            positions=positions,
+            open_orders=open_orders,
+            scan_result=filtered_scan_result,
+            market_context=market_context,
+            event_context=event_context,
+            news_context=news_context,
+        )
+        packet_dict = packet.to_dict()
+        decision = _pre_llm_skip_decision(symbols[0], reason)
+        return (
+            {
+                "decision_id": None,
+                "accepted": True,
+                "validator_errors": [],
+                "decision": decision,
+                "decision_source": "pre_llm_filter",
+                "llm_called": False,
+                "pre_llm_filter": pre_llm_filter,
+                "order_preview": None,
+                "packet": packet_dict,
+                "raw_response": None,
+            },
+            filtered_scan_result,
+        )
+
+    news_context = build_news_context(config=config, alpaca=alpaca, symbols=symbols)
     packet = build_decision_packet(
         config=config,
         account=account,
         clock=clock,
         positions=positions,
         open_orders=open_orders,
-        scan_result=scan_result,
+        scan_result=filtered_scan_result,
         market_context=market_context,
         event_context=event_context,
         news_context=news_context,
@@ -711,8 +759,8 @@ def _build_decision_artifact(
     decision, raw_response, model = _get_llm_or_mock_decision(mock_decision, config, packet_dict)
     validator_errors = validate_decision_payload(
         decision,
-        candidate_ids=packet_candidate_ids(scan_result),
-        candidates_by_id=candidate_dicts_by_id(scan_result),
+        candidate_ids=packet_candidate_ids(filtered_scan_result),
+        candidates_by_id=candidate_dicts_by_id(filtered_scan_result),
         allowed_symbols=set(symbols),
         open_position_symbols={str(position.get("symbol")) for position in positions if position.get("symbol")},
         market_context=packet_dict["market_context"],
@@ -759,12 +807,239 @@ def _build_decision_artifact(
             "accepted": not validator_errors,
             "validator_errors": validator_errors,
             "decision": decision,
+            "decision_source": "mock" if mock_decision else "openai",
+            "llm_called": not bool(mock_decision),
+            "pre_llm_filter": pre_llm_filter,
             "order_preview": order_preview,
             "packet": packet_dict,
             "raw_response": raw_response,
         },
-        scan_result,
+        filtered_scan_result,
     )
+
+
+def _apply_pre_llm_filters(
+    *,
+    config,
+    symbols: list[str],
+    scan_result,
+    market_context: dict[str, Any],
+    event_context: dict[str, Any],
+) -> tuple[Any, dict[str, Any]]:
+    symbol = symbols[0] if symbols else None
+    raw_candidates = list(scan_result.candidates)
+    context_reasons = _pre_llm_context_block_reasons(
+        config=config,
+        symbol=symbol,
+        market_context=market_context,
+        event_context=event_context,
+    )
+    eligible_candidates = []
+    blocked_candidates = []
+
+    for candidate in raw_candidates:
+        candidate_reasons = list(context_reasons)
+        candidate_reasons.extend(
+            _pre_llm_candidate_block_reasons(
+                config=config,
+                candidate=candidate.to_dict(),
+            )
+        )
+        if candidate_reasons:
+            blocked_candidates.append(
+                {
+                    "candidate_id": candidate.candidate_id,
+                    "reasons": candidate_reasons,
+                }
+            )
+            continue
+        eligible_candidates.append(candidate)
+
+    block_reasons = _unique_reasons(
+        list(context_reasons)
+        + [
+            reason
+            for item in blocked_candidates
+            for reason in item.get("reasons", [])
+        ]
+    )
+    if not raw_candidates:
+        block_reasons.append("No candidates passed scanner filters: DTE, delta, distance, liquidity, and credit.")
+
+    filtered_warnings = list(scan_result.warnings)
+    if block_reasons:
+        filtered_warnings.append("Pre-LLM hard filters: " + "; ".join(block_reasons))
+
+    filtered_scan_result = replace(
+        scan_result,
+        candidates=eligible_candidates,
+        warnings=filtered_warnings,
+    )
+    return filtered_scan_result, {
+        "enabled": True,
+        "raw_candidate_count": len(raw_candidates),
+        "eligible_candidate_count": len(eligible_candidates),
+        "blocked_candidate_count": len(blocked_candidates),
+        "block_reasons": block_reasons,
+        "blocked_candidates": blocked_candidates[:20],
+    }
+
+
+def _pre_llm_context_block_reasons(
+    *,
+    config,
+    symbol: str | None,
+    market_context: dict[str, Any],
+    event_context: dict[str, Any],
+) -> list[str]:
+    reasons: list[str] = []
+    symbols_context = market_context.get("symbols")
+    if not isinstance(symbols_context, dict) or not symbol:
+        reasons.append("Market context is unavailable before LLM decision.")
+    else:
+        symbol_context = symbols_context.get(symbol)
+        if not isinstance(symbol_context, dict):
+            reasons.append(f"Market context is unavailable for {symbol}.")
+        else:
+            if symbol_context.get("latest_bar_fresh") is not True:
+                reasons.append(f"Latest market bar is not fresh for {symbol}.")
+            if symbol_context.get("market_trend_ok") is not True:
+                reasons.append(f"Market trend filter is not passing for {symbol}.")
+
+    broad_symbol = str(config.get("market_filters", "broad_market_symbol", default="") or "").strip().upper()
+    if broad_symbol:
+        broad_context = symbols_context.get(broad_symbol) if isinstance(symbols_context, dict) else None
+        if not isinstance(broad_context, dict):
+            reasons.append(f"Broad market context is unavailable for {broad_symbol}.")
+        else:
+            if broad_context.get("latest_bar_fresh") is not True:
+                reasons.append(f"Broad market latest bar is not fresh for {broad_symbol}.")
+            if broad_context.get("block_intraday_down") is not False:
+                reasons.append(f"Broad market intraday down filter is not passing for {broad_symbol}.")
+            if bool(config.get("market_filters", "require_broad_market_above_30m_ma", default=True)):
+                if broad_context.get("above_trend_ma") is not True:
+                    reasons.append(f"Broad market moving-average filter is not passing for {broad_symbol}.")
+
+    event_symbols = event_context.get("symbols")
+    if not isinstance(event_symbols, dict) or not symbol:
+        reasons.append("Event context is unavailable before LLM decision.")
+    else:
+        symbol_event = event_symbols.get(symbol)
+        if not isinstance(symbol_event, dict):
+            reasons.append(f"Event context is unavailable for {symbol}.")
+        elif symbol_event.get("earnings_ok") is not True:
+            reasons.append(f"Earnings/event filter is not passing for {symbol}.")
+
+    return _unique_reasons(reasons)
+
+
+def _pre_llm_candidate_block_reasons(*, config, candidate: dict[str, Any]) -> list[str]:
+    reasons: list[str] = []
+    if candidate.get("liquidity_ok") is not True:
+        reasons.append("Candidate liquidity filter is not passing.")
+
+    max_loss_per_trade = _decimal_or_none(config.get("risk", "max_loss_per_trade"))
+    if max_loss_per_trade is not None:
+        candidate_max_loss = _decimal_or_none(candidate.get("max_loss"))
+        if candidate_max_loss is None:
+            reasons.append("Candidate max loss is unavailable.")
+        elif candidate_max_loss > max_loss_per_trade:
+            reasons.append(f"Candidate max loss {candidate_max_loss} exceeds limit {max_loss_per_trade}.")
+
+    max_quote_age_seconds = int(config.get("market_filters", "max_option_quote_age_minutes", default=30)) * 60
+    quote_age = candidate.get("max_quote_age_seconds")
+    if not isinstance(quote_age, int):
+        reasons.append("Candidate option quote age is unavailable.")
+    elif quote_age < -60:
+        reasons.append(f"Candidate option quote timestamp is from the future: age={quote_age}.")
+    elif quote_age > max_quote_age_seconds:
+        reasons.append(f"Candidate option quote age {quote_age}s exceeds limit {max_quote_age_seconds}s.")
+
+    min_distance = _decimal_or_none(config.get("strategy", "min_short_put_distance_pct"))
+    if min_distance is not None and min_distance > 0:
+        candidate_distance = _decimal_or_none(candidate.get("short_put_distance_pct"))
+        if candidate_distance is None:
+            reasons.append("Candidate short put distance is unavailable.")
+        elif candidate_distance < min_distance:
+            reasons.append(f"Candidate short put distance {candidate_distance} is below minimum {min_distance}%.")
+
+    return reasons
+
+
+def _pre_llm_skip_reason(pre_llm_filter: dict[str, Any]) -> str:
+    reasons = pre_llm_filter.get("block_reasons") or []
+    if reasons:
+        return "Hard filters blocked LLM call: " + "; ".join(str(reason) for reason in reasons[:3])
+    return "Hard filters blocked LLM call."
+
+
+def _pre_llm_skip_decision(symbol: str | None, reason: str) -> dict[str, Any]:
+    return {
+        "action": "skip",
+        "symbol": symbol,
+        "candidate_id": None,
+        "quantity": 0,
+        "limit_price": None,
+        "confidence": 1.0,
+        "decision_reason": reason,
+        "news_assessment": {
+            "risk_level": "unknown",
+            "sentiment": "unknown",
+            "summary": "News was not evaluated because hard numeric filters failed first.",
+        },
+        "risk_checklist": _default_true_risk_checklist(no_material_negative_news=False),
+        "exit_plan": {
+            "profit_take_credit_pct": 50,
+            "loss_trigger": "2x initial credit or short put delta above 0.45",
+            "close_before_expiry_days": 3,
+        },
+    }
+
+
+def _empty_news_context(*, config, symbols: list[str], warning: str) -> NewsContext:
+    return NewsContext(
+        provider=str(config.get("news", "provider", default="alpaca")),
+        generated_at=datetime.now(UTC).isoformat(),
+        lookback_hours=int(config.get("news", "lookback_hours", default=24)),
+        symbols=symbols,
+        item_count=0,
+        items=[],
+        warnings=[warning],
+    )
+
+
+def _default_true_risk_checklist(*, no_material_negative_news: bool = True) -> dict[str, bool]:
+    return {
+        "defined_risk": True,
+        "within_max_loss": True,
+        "liquidity_ok": True,
+        "earnings_ok": True,
+        "no_material_negative_news": no_material_negative_news,
+        "market_trend_ok": True,
+        "broad_market_ok": True,
+        "short_put_distance_ok": True,
+    }
+
+
+def _unique_reasons(reasons: Any) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for reason in reasons:
+        text = str(reason)
+        if text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+    return result
+
+
+def _decimal_or_none(value: Any) -> Decimal | None:
+    if value is None:
+        return None
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
 
 
 def _load_prompt_text(prompt_version: str) -> str:
@@ -788,14 +1063,7 @@ def _mock_decision(action: str) -> dict[str, Any]:
             "sentiment": "unknown",
             "summary": "Mock decision; news was not evaluated.",
         },
-        "risk_checklist": {
-            "defined_risk": True,
-            "within_max_loss": True,
-            "liquidity_ok": True,
-            "earnings_ok": True,
-            "no_material_negative_news": False,
-            "market_trend_ok": True,
-        },
+        "risk_checklist": _default_true_risk_checklist(no_material_negative_news=False),
         "exit_plan": {
             "profit_take_credit_pct": 50,
             "loss_trigger": "2x initial credit or short put delta above 0.45",
@@ -814,6 +1082,9 @@ def _compact_watchlist_artifact(symbol: str, artifact: dict[str, Any]) -> dict[s
         "accepted": artifact["accepted"],
         "validator_errors": artifact["validator_errors"],
         "decision": decision,
+        "decision_source": artifact.get("decision_source"),
+        "llm_called": artifact.get("llm_called"),
+        "pre_llm_filter": artifact.get("pre_llm_filter"),
         "order_preview": artifact.get("order_preview"),
         "selected_candidate": selected_candidate,
         "candidate_count": len(packet.get("option_scan", {}).get("candidates", [])),

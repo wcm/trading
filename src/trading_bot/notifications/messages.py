@@ -198,6 +198,7 @@ def _send_open_discovery_summary(
             ]
         )
     else:
+        hard_filter_summary = _hard_filter_summary(watchlist)
         lines.extend(
             [
                 "**Selected:** none",
@@ -205,6 +206,8 @@ def _send_open_discovery_summary(
                 f"**Executable:** {allocation.get('execution_eligible_open_count')}",
             ]
         )
+        if hard_filter_summary:
+            lines.extend(["", *hard_filter_summary])
 
     messages = ["\n".join(lines)]
     if include_decision_details:
@@ -309,6 +312,7 @@ def _watchlist_decision_detail_messages(artifact: dict[str, Any], *, heading: st
             f"**Symbol:** {item.get('symbol')}",
             f"**Action:** {action}",
             f"**Accepted:** {item.get('accepted')}",
+            f"**Source:** {item.get('decision_source') or 'unknown'}",
             f"**Candidate:** {decision.get('candidate_id')}",
             f"**Confidence:** {decision.get('confidence')}",
             f"**Order preview:** {_preview_status(item.get('order_preview'))}",
@@ -691,6 +695,30 @@ def _simple_skip_reason(reason: object) -> str:
         if text.startswith(prefix):
             return text[len(prefix):]
     return text
+
+
+def _hard_filter_summary(watchlist: dict[str, Any]) -> list[str]:
+    items = [item for item in watchlist.get("per_symbol", []) if isinstance(item, dict)]
+    if not items:
+        return []
+    filters = [item.get("pre_llm_filter") for item in items if isinstance(item.get("pre_llm_filter"), dict)]
+    if not filters:
+        return []
+    passed = len([item for item in filters if item.get("eligible_candidate_count", 0) > 0])
+    lines = [f"**Hard filters passed:** {passed} / {len(items)}"]
+    if passed == 0:
+        first_reason = _first_hard_filter_reason(filters)
+        if first_reason:
+            lines.append(f"**Reason:** {first_reason}")
+    return lines
+
+
+def _first_hard_filter_reason(filters: list[dict[str, Any]]) -> str | None:
+    for item in filters:
+        reasons = item.get("block_reasons") or []
+        if reasons:
+            return str(reasons[0])
+    return None
 
 
 def _open_discovery_human_status(artifact: dict[str, Any]) -> str:

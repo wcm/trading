@@ -8,15 +8,18 @@ import tempfile
 import unittest
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 from trading_bot.config import load_config
 from trading_bot.cli.parser import build_parser
 from trading_bot.cycles.open_discovery import (
+    _build_decision_artifact,
     _build_open_discovery_cycle_artifact,
     _max_concurrent_symbols,
     _run_open_discovery_cycle_with_lock,
 )
+from trading_bot.data.news import NewsContext
 from trading_bot.notifications.messages import (
     _send_daily_trading_summary,
     _send_open_discovery_summary,
@@ -38,6 +41,7 @@ from trading_bot.scheduler.local import (
 from trading_bot.notifications.discord import NotificationResult
 from trading_bot.risk.kill_switch import KillSwitch
 from trading_bot.storage.db import init_db
+from tests.test_put_credit_spread import FakeAlpacaClient
 
 
 class RiskBlockedAlpaca:
@@ -61,6 +65,118 @@ class FakeNotifier:
     def send(self, content: str) -> NotificationResult:
         self.messages.append(content)
         return NotificationResult(ok=True)
+
+
+class FreshDecisionAlpaca(FakeAlpacaClient):
+    def get_account(self) -> dict:
+        return {
+            "status": "ACTIVE",
+            "equity": "100000",
+            "last_equity": "100000",
+            "buying_power": "200000",
+            "portfolio_value": "100000",
+        }
+
+    def get_clock(self) -> dict:
+        return {"is_open": True, "timestamp": datetime.now(UTC).isoformat()}
+
+    def get_positions(self) -> list[dict]:
+        return []
+
+    def get_orders(self, *, status: str = "open", limit: int = 50) -> list[dict]:
+        return []
+
+    def get_stock_bars(
+        self,
+        symbols: list[str],
+        *,
+        timeframe: str,
+        start: str,
+        end: str | None = None,
+        feed: str = "iex",
+        limit: int = 10_000,
+        sort: str = "asc",
+    ) -> dict[str, list[dict[str, Any]]]:
+        now = datetime.now(UTC)
+        bars = []
+        for index in range(25):
+            close = 100 + index
+            bars.append(
+                {
+                    "t": now.replace(microsecond=0).isoformat(),
+                    "o": str(100 + index - 1),
+                    "h": str(close + 1),
+                    "l": str(close - 1),
+                    "c": str(close),
+                    "v": 1000,
+                }
+            )
+        return {symbol: bars for symbol in symbols}
+
+    def get_option_snapshots(
+        self,
+        symbols: list[str],
+        *,
+        feed: str = "indicative",
+        chunk_size: int = 100,
+    ) -> dict[str, dict[str, Any]]:
+        snapshots = super().get_option_snapshots(symbols, feed=feed, chunk_size=chunk_size)
+        now = datetime.now(UTC).replace(microsecond=0).isoformat()
+        for snapshot in snapshots.values():
+            snapshot["latestQuote"]["t"] = now
+        return snapshots
+
+
+class NoCandidateDecisionAlpaca(FreshDecisionAlpaca):
+    def get_option_contracts(
+        self,
+        *,
+        underlying_symbols: list[str],
+        expiration_date_gte: str,
+        expiration_date_lte: str,
+        option_type: str = "put",
+        status: str = "active",
+        limit: int = 10_000,
+    ) -> list[dict[str, Any]]:
+        return []
+
+
+class FakeOpenAIClient:
+    model = "test-model"
+
+    def create_trading_decision(self, *, prompt_text: str, decision_packet: dict[str, Any]) -> tuple[dict, dict]:
+        return (
+            {
+                "action": "skip",
+                "symbol": "AAPL",
+                "candidate_id": None,
+                "quantity": 0,
+                "limit_price": None,
+                "confidence": 0.9,
+                "decision_reason": "Fake model skip after hard filters passed.",
+                "news_assessment": {
+                    "risk_level": "low",
+                    "sentiment": "neutral",
+                    "summary": "No material test news.",
+                },
+                "risk_checklist": {
+                    "defined_risk": True,
+                    "within_max_loss": True,
+                    "liquidity_ok": True,
+                    "earnings_ok": True,
+                    "no_material_negative_news": True,
+                    "market_trend_ok": True,
+                    "broad_market_ok": True,
+                    "short_put_distance_ok": True,
+                },
+                "exit_plan": {
+                    "profit_take_credit_pct": 50,
+                    "loss_trigger": "2x initial credit or short put delta above 0.45",
+                    "close_before_expiry_days": 3,
+                },
+            },
+            {"fake": True},
+        )
 
 
 def watchlist_artifact_with_reason(reason: str) -> dict:
@@ -241,6 +357,72 @@ class OpenDiscoveryTests(unittest.TestCase):
 
         self.assertEqual(_max_concurrent_symbols(config, 8), 8)
         self.assertEqual(_max_concurrent_symbols(config, 3), 3)
+
+    def test_pre_llm_filter_skips_news_and_openai_when_no_numeric_candidates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "bot.sqlite3"
+            init_db(db_path)
+
+            with (
+                patch("trading_bot.cycles.open_discovery.build_news_context") as news_context,
+                patch("trading_bot.cycles.open_discovery.OpenAIClient.from_config") as openai_client,
+            ):
+                artifact, scan_result = _build_decision_artifact(
+                    config=load_config("config/settings.yaml"),
+                    db_path=db_path,
+                    alpaca=NoCandidateDecisionAlpaca(),
+                    symbols=["AAPL"],
+                    max_candidates=5,
+                    option_feed="indicative",
+                    mock_decision=None,
+                )
+
+        news_context.assert_not_called()
+        openai_client.assert_not_called()
+        self.assertEqual(scan_result.candidates, [])
+        self.assertEqual(artifact["decision_source"], "pre_llm_filter")
+        self.assertFalse(artifact["llm_called"])
+        self.assertEqual(artifact["decision"]["action"], "skip")
+        self.assertEqual(artifact["pre_llm_filter"]["raw_candidate_count"], 0)
+        self.assertEqual(artifact["pre_llm_filter"]["eligible_candidate_count"], 0)
+        self.assertIn("No candidates passed scanner filters", artifact["decision"]["decision_reason"])
+
+    def test_pre_llm_filter_allows_news_and_decision_when_numeric_candidates_pass(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "bot.sqlite3"
+            init_db(db_path)
+            news = NewsContext(
+                provider="test",
+                generated_at=datetime.now(UTC).isoformat(),
+                lookback_hours=24,
+                symbols=["AAPL"],
+                item_count=0,
+                items=[],
+                warnings=[],
+            )
+
+            with (
+                patch("trading_bot.cycles.open_discovery.build_news_context", return_value=news) as news_context,
+                patch("trading_bot.cycles.open_discovery.OpenAIClient.from_config", return_value=FakeOpenAIClient()) as openai_client,
+            ):
+                artifact, scan_result = _build_decision_artifact(
+                    config=load_config("config/settings.yaml"),
+                    db_path=db_path,
+                    alpaca=FreshDecisionAlpaca(),
+                    symbols=["AAPL"],
+                    max_candidates=5,
+                    option_feed="indicative",
+                    mock_decision=None,
+                )
+
+        news_context.assert_called_once()
+        openai_client.assert_called_once()
+        self.assertEqual(len(scan_result.candidates), 1)
+        self.assertEqual(artifact["decision_source"], "openai")
+        self.assertTrue(artifact["llm_called"])
+        self.assertEqual(artifact["pre_llm_filter"]["raw_candidate_count"], 1)
+        self.assertEqual(artifact["pre_llm_filter"]["eligible_candidate_count"], 1)
+        self.assertEqual(artifact["pre_llm_filter"]["block_reasons"], [])
 
     def test_scheduler_cycle_json_output_is_timestamped(self) -> None:
         args = build_parser().parse_args(
@@ -468,6 +650,33 @@ class OpenDiscoveryTests(unittest.TestCase):
         self.assertIn("# New Trade Search", notifier.messages[0])
         self.assertIn("**Selected:** none", notifier.messages[0])
         self.assertIn(reason, "".join(notifier.messages[1:]))
+
+    def test_open_discovery_summary_reports_hard_filter_reason(self) -> None:
+        watchlist = watchlist_artifact_with_reason("Hard filters blocked LLM call.")
+        watchlist["per_symbol"][0]["pre_llm_filter"] = {
+            "raw_candidate_count": 0,
+            "eligible_candidate_count": 0,
+            "block_reasons": ["No candidates passed scanner filters."],
+        }
+        artifact = _build_open_discovery_cycle_artifact(
+            config=load_config("config/settings.yaml"),
+            phase="open_discovery",
+            watchlist_artifact=watchlist,
+            skipped_open_reason=None,
+        )
+        notifier = FakeNotifier()
+
+        ok = _send_open_discovery_summary(
+            notifier,
+            artifact,
+            logging.getLogger("test"),
+            include_decision_details=False,
+        )
+
+        self.assertTrue(ok)
+        self.assertEqual(len(notifier.messages), 1)
+        self.assertIn("**Hard filters passed:** 0 / 1", notifier.messages[0])
+        self.assertIn("**Reason:** No candidates passed scanner filters.", notifier.messages[0])
 
     def test_order_poll_discord_sends_simple_order_event_messages(self) -> None:
         open_order = {

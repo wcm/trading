@@ -73,6 +73,7 @@ A strategy owns:
 - tradable universe
 - candidate generation
 - strategy-specific market filters
+- strategy-specific hard pre-LLM filters
 - strategy-specific decision packet
 - strategy-specific LLM prompt
 - strategy-specific validator
@@ -99,7 +100,7 @@ Shared infrastructure owns:
 - kill switch and emergency stop
 
 The LLM may help decide inside a strategy, but it should never bypass shared
-infrastructure gates.
+infrastructure gates or strategy hard filters.
 
 ## 4. Shared Runtime Flow
 
@@ -114,12 +115,14 @@ The target multi-strategy cycle should look like this:
 7. Submit guarded close/reduce-risk orders when allowed.
 8. Refresh account state and shared risk after monitor/close finishes.
 9. For each enabled strategy, run its discovery/decision path if its cadence is due and risk gates allow new opens.
-10. Validate every strategy decision with strategy-specific and shared validators.
-11. Allocate risk across all accepted open decisions.
-12. Revalidate fresh quotes immediately before submit.
-13. Submit bounded limit orders only.
-14. Poll/manage order lifecycle.
-15. Persist artifacts, SQLite rows, logs, and Discord summaries.
+10. Apply strategy hard filters before any LLM call.
+11. Call the LLM only for candidates that passed hard filters, so it focuses on news and subjective judgment.
+12. Validate every strategy decision with strategy-specific and shared validators.
+13. Allocate risk across all accepted open decisions.
+14. Revalidate fresh quotes immediately before submit.
+15. Submit bounded limit orders only.
+16. Poll/manage order lifecycle.
+17. Persist artifacts, SQLite rows, logs, and Discord summaries.
 
 Today this flow exists mostly for `put_credit_strategy`. The infrastructure plan
 is to generalize it without losing the hard safety gates already working.

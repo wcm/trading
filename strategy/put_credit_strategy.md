@@ -98,6 +98,29 @@ It only considers spreads with:
 - market trend passing
 - earnings not too close, if known
 
+Then the bot runs a hard pre-LLM filter.
+
+This happens before fetching news and before calling the LLM.
+
+The bot skips the LLM if:
+
+- no option candidates passed the scanner
+- the latest stock bar is stale
+- the stock trend filter is failing
+- QQQ broad-market filter is failing
+- earnings/event filter is failing
+- candidate max loss is above the per-trade limit
+- option quotes are stale
+- the short put is too close to the current stock price
+
+Plain English:
+
+```text
+If the numbers are bad, do not ask the AI to talk us into a trade.
+```
+
+Only after the hard filters pass does the bot fetch news and call the LLM.
+
 Then the LLM receives:
 
 - stock price data
@@ -228,6 +251,9 @@ Every 5 minutes during market hours:
   scan watchlist
   generate put credit spreads
   remove candidates too close to danger
+  hard numeric filters pass?
+  if no, skip without news or LLM
+  fetch news
   give candidates + news to LLM
   validate hard rules
   pick best trade
