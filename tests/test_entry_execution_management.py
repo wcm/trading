@@ -112,16 +112,17 @@ class EntryExecutionManagementTests(unittest.TestCase):
         self.assertEqual(refreshed["errors"], [])
         self.assertTrue(refreshed["revalidation"]["ok"])
         self.assertEqual(refreshed["revalidation"]["current_net_credit"], "1.03")
-        self.assertEqual(refreshed["payload"]["limit_price"], "-1")
-        self.assertEqual(refreshed["estimated_entry_credit"], "100")
-        self.assertEqual(refreshed["estimated_max_loss"], "400")
+        self.assertEqual(refreshed["revalidation"]["min_acceptable_credit"], "0.5")
+        self.assertEqual(refreshed["payload"]["limit_price"], "-0.98")
+        self.assertEqual(refreshed["estimated_entry_credit"], "98")
+        self.assertEqual(refreshed["estimated_max_loss"], "402")
 
     def test_revalidation_blocks_when_current_credit_is_below_minimum(self) -> None:
         config = execution_config(entry_limit_credit_buffer=0.05)
         preview = clean_preview(config)
         alpaca = FakeQuoteClient(
-            short_bid="1.70",
-            short_ask="1.75",
+            short_bid="1.40",
+            short_ask="1.45",
             long_bid="0.95",
             long_ask="0.97",
         )
@@ -156,7 +157,7 @@ class EntryExecutionManagementTests(unittest.TestCase):
         self.assertEqual(alpaca.cancelled_order_ids, ["order-1", "order-2"])
         self.assertEqual(len(alpaca.submitted_payloads), 1)
         self.assertEqual(alpaca.submitted_payloads[0]["client_order_id"], "preview-aapl-test-001-r1")
-        self.assertEqual(alpaca.submitted_payloads[0]["limit_price"], "-1")
+        self.assertEqual(alpaca.submitted_payloads[0]["limit_price"], "-0.93")
 
     def test_revalidates_all_accepted_open_previews(self) -> None:
         config = execution_config(entry_limit_credit_buffer=0.05)

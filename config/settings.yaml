@@ -56,7 +56,7 @@ strategy:
   spread_widths:
     - 5
     - 10
-  min_credit_as_width_pct: 0.20
+  min_credit_as_width_pct: 0.10
   close_profit_pct: 0.50
   close_before_expiry_days: 3
 

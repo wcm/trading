@@ -93,7 +93,7 @@ It only considers spreads with:
   below the current stock price
 - **Spread width 5 or 10**: the strike gap is $5 or $10
 - enough **liquidity**: enough people trading it
-- enough **credit**: at least 20% of the spread width
+- enough **credit**: at least 10% of the spread width
 - fresh option quotes
 - market trend passing
 - earnings not too close, if known
