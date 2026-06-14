@@ -13,6 +13,23 @@ def decimal_or_none(value: Any) -> Decimal | None:
         return None
 
 
+def int_or_none(value: Any) -> int | None:
+    parsed = decimal_or_none(value)
+    if parsed is None:
+        return None
+    return int(parsed)
+
+
+def format_decimal(value: Decimal) -> str:
+    return f"{value.normalize():f}"
+
+
+def format_optional_decimal_compact(value: Decimal | None) -> str | None:
+    if value is None:
+        return None
+    return format_decimal(value)
+
+
 def sum_decimal_strings(values: list[Any]) -> Decimal | None:
     total = Decimal("0")
     seen = False

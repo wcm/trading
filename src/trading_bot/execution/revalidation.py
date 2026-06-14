@@ -2,11 +2,18 @@ from __future__ import annotations
 
 import copy
 from datetime import UTC, datetime
-from decimal import Decimal, InvalidOperation, ROUND_DOWN
+from decimal import Decimal, ROUND_DOWN
 from typing import Any
 
 from trading_bot.brokers.alpaca import AlpacaClient
 from trading_bot.config import AppConfig
+from trading_bot.utils.mapping import nested_get as _nested_get
+from trading_bot.utils.market_time import age_seconds as _age_seconds
+from trading_bot.utils.market_time import parse_timestamp as _parse_time
+from trading_bot.utils.money import decimal_or_none as _decimal_or_none
+from trading_bot.utils.money import format_decimal as _fmt_decimal
+from trading_bot.utils.money import format_optional_decimal_compact as _fmt_optional_decimal
+from trading_bot.utils.money import int_or_none as _int_or_none
 
 
 def revalidate_put_credit_spread_entry_preview(
@@ -207,13 +214,6 @@ def _latest_quote(snapshot: Any) -> dict[str, Any]:
     return quote if isinstance(quote, dict) else {}
 
 
-def _nested_get(mapping: dict[str, Any], *keys: str) -> Any:
-    for key in keys:
-        if key in mapping:
-            return mapping[key]
-    return None
-
-
 def _spread_width(candidate: dict[str, Any]) -> Decimal | None:
     width = _decimal_or_none(candidate.get("width"))
     if width is not None:
@@ -225,45 +225,6 @@ def _spread_width(candidate: dict[str, Any]) -> Decimal | None:
     return short_strike - long_strike
 
 
-def _parse_time(value: Any) -> datetime | None:
-    if not value:
-        return None
-    try:
-        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=UTC)
-    return parsed.astimezone(UTC)
-
-
-def _age_seconds(now: datetime, timestamp: datetime | None) -> int | None:
-    if timestamp is None:
-        return None
-    age = int((now - timestamp).total_seconds())
-    if -60 <= age < 0:
-        return 0
-    return age
-
-
-def _decimal_or_none(value: Any) -> Decimal | None:
-    if value is None:
-        return None
-    try:
-        return Decimal(str(value))
-    except (InvalidOperation, ValueError):
-        return None
-
-
-def _int_or_none(value: Any) -> int | None:
-    if value is None:
-        return None
-    try:
-        return int(Decimal(str(value)))
-    except (InvalidOperation, ValueError):
-        return None
-
-
 def _round_credit_down(value: Decimal) -> Decimal:
     return value.quantize(Decimal("0.01"), rounding=ROUND_DOWN)
 
@@ -273,13 +234,3 @@ def _round_credit_up(value: Decimal) -> Decimal:
     if rounded == value:
         return rounded
     return rounded + Decimal("0.01")
-
-
-def _fmt_optional_decimal(value: Decimal | None) -> str | None:
-    if value is None:
-        return None
-    return _fmt_decimal(value)
-
-
-def _fmt_decimal(value: Decimal) -> str:
-    return f"{value.normalize():f}"

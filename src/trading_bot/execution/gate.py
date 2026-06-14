@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from typing import Any
 
 from trading_bot.brokers.alpaca import AlpacaClient
@@ -11,6 +11,7 @@ from trading_bot.execution.revalidation import revalidate_put_credit_spread_entr
 from trading_bot.monitoring.positions import parse_occ_option_symbol
 from trading_bot.notifications.discord import DiscordNotifier
 from trading_bot.risk.kill_switch import KillSwitch
+from trading_bot.utils.money import decimal_or_none as _decimal_or_none
 
 
 @dataclass(frozen=True)
@@ -542,12 +543,3 @@ def _position_average_entry_price(position: dict[str, Any], quantity_abs: int) -
     if cost_basis is None or quantity_abs <= 0:
         return None
     return abs(cost_basis) / Decimal(quantity_abs) / Decimal("100")
-
-
-def _decimal_or_none(value: Any) -> Decimal | None:
-    if value is None:
-        return None
-    try:
-        return Decimal(str(value))
-    except (InvalidOperation, ValueError):
-        return None

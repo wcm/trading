@@ -1,8 +1,11 @@
 from __future__ import annotations
 
-from decimal import Decimal, InvalidOperation
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any
+
+from trading_bot.utils.money import decimal_or_none as _decimal_or_none
+from trading_bot.utils.money import format_decimal as _fmt_decimal
 
 
 def build_client_order_id(prefix: str, symbol: str, sequence: int) -> str:
@@ -179,16 +182,3 @@ def build_put_credit_spread_close_preview(
         "errors": errors,
         "warnings": warnings,
     }
-
-
-def _decimal_or_none(value: Any) -> Decimal | None:
-    if value is None:
-        return None
-    try:
-        return Decimal(str(value))
-    except (InvalidOperation, ValueError):
-        return None
-
-
-def _fmt_decimal(value: Decimal) -> str:
-    return f"{value.normalize():f}"

@@ -2,12 +2,15 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, time, timedelta
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from trading_bot.brokers.alpaca import AlpacaClient
 from trading_bot.config import AppConfig
+from trading_bot.utils.market_time import age_seconds as _age_seconds
+from trading_bot.utils.market_time import parse_timestamp as _parse_time
+from trading_bot.utils.money import decimal_or_none as _decimal_or_none
 
 
 EASTERN = ZoneInfo("America/New_York")
@@ -226,28 +229,6 @@ def _build_symbol_context(
     )
 
 
-def _parse_time(value: Any) -> datetime | None:
-    if not value:
-        return None
-    try:
-        text = str(value).replace("Z", "+00:00")
-        parsed = datetime.fromisoformat(text)
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=UTC)
-    return parsed.astimezone(UTC)
-
-
-def _age_seconds(now: datetime, timestamp: datetime | None) -> int | None:
-    if timestamp is None:
-        return None
-    age = int((now - timestamp).total_seconds())
-    if -60 <= age < 0:
-        return 0
-    return age
-
-
 def _broad_market_filter_ok(context: SymbolMarketContext, *, require_above_ma: bool) -> bool:
     if context.latest_bar_fresh is not True:
         return False
@@ -275,15 +256,6 @@ def _symbol_or_none(value: Any) -> str | None:
         return None
     symbol = str(value).strip().upper()
     return symbol or None
-
-
-def _decimal_or_none(value: Any) -> Decimal | None:
-    if value is None:
-        return None
-    try:
-        return Decimal(str(value))
-    except (InvalidOperation, ValueError):
-        return None
 
 
 def _fmt_optional_decimal(value: Decimal | None) -> str | None:

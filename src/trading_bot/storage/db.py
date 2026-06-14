@@ -3,11 +3,14 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import closing
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 from trading_bot.monitoring.positions import parse_occ_option_symbol
+from trading_bot.utils.money import decimal_or_none as _decimal_or_none
+from trading_bot.utils.money import format_decimal as _fmt_decimal
+from trading_bot.utils.money import format_optional_decimal_compact as _fmt_optional_decimal
 
 
 def init_db(db_path: Path) -> None:
@@ -996,22 +999,3 @@ def _loads_json(value: str) -> Any:
         return json.loads(value)
     except (TypeError, json.JSONDecodeError):
         return None
-
-
-def _decimal_or_none(value: Any) -> Decimal | None:
-    if value is None:
-        return None
-    try:
-        return Decimal(str(value))
-    except (InvalidOperation, ValueError):
-        return None
-
-
-def _fmt_optional_decimal(value: Decimal | None) -> str | None:
-    if value is None:
-        return None
-    return _fmt_decimal(value)
-
-
-def _fmt_decimal(value: Decimal) -> str:
-    return format(value.normalize(), "f")

@@ -121,7 +121,6 @@ def _send_watchlist_decision_summary(
 ) -> bool:
     allocation = artifact["allocation"]
     selected = allocation.get("selected_open")
-    selected_preview = artifact.get("selected_order_preview")
     execution_attempt = artifact.get("execution_attempt")
     selected_line = (
         f"{selected['symbol']} {selected['candidate_id']} limit {selected['limit_price']} "
@@ -179,14 +178,7 @@ def _send_open_discovery_summary(
     watchlist = artifact.get("watchlist_decision") or {}
     allocation = watchlist.get("allocation") or {}
     selected = allocation.get("selected_open")
-    selected_preview = watchlist.get("selected_order_preview")
     execution_attempt = watchlist.get("execution_attempt")
-    selected_line = (
-        f"{selected['symbol']} {selected['candidate_id']} limit {selected['limit_price']} "
-        f"max_loss {selected['max_loss']}"
-        if selected
-        else "none"
-    )
     lines.append("")
     if selected:
         lines.extend(
@@ -276,20 +268,6 @@ def _send_daily_trading_summary(
 
     messages = _split_discord_content("\n".join(lines))
     return _send_discord_messages(notifier, messages, logger, "daily trading summary")
-
-
-def _close_execution_status_lines(close_execution_attempts: list[dict[str, Any]]) -> list[str]:
-    if not close_execution_attempts:
-        return ["Close execution: not attempted"]
-    lines = [f"Close execution attempts: {len(close_execution_attempts)}"]
-    for item in close_execution_attempts[:5]:
-        if not isinstance(item, dict):
-            continue
-        attempt = item.get("execution_attempt") if isinstance(item, dict) else None
-        lines.append(
-            f"- {item.get('spread_id')}: {_execution_status(attempt if isinstance(attempt, dict) else None)}"
-        )
-    return lines
 
 
 def _watchlist_decision_detail_messages(artifact: dict[str, Any], *, heading: str) -> list[str]:
@@ -719,16 +697,3 @@ def _first_hard_filter_reason(filters: list[dict[str, Any]]) -> str | None:
         if reasons:
             return str(reasons[0])
     return None
-
-
-def _open_discovery_human_status(artifact: dict[str, Any]) -> str:
-    phase = artifact.get("phase")
-    if phase == "open_discovery":
-        return "Looked for new trades after the position monitor finished."
-    if phase == "open_account_risk_block":
-        return "Risk limits blocked new trades before the AI search."
-    if phase == "open_account_risk_error":
-        return "Could not safely check account risk, so new trades were skipped."
-    if phase == "open_no_symbols":
-        return "No symbols were configured for the new-trade search."
-    return str(phase or "completed")

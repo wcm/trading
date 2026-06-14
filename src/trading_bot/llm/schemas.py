@@ -3,6 +3,8 @@ from __future__ import annotations
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from trading_bot.utils.money import decimal_or_none as _decimal_or_none
+
 
 ALLOWED_ACTIONS = {"open", "close", "hold", "skip", "disable_trading"}
 REQUIRED_DECISION_FIELDS = {
@@ -343,12 +345,3 @@ def _validate_nested_objects(payload: dict[str, Any], errors: list[str]) -> None
     exit_plan = payload.get("exit_plan")
     if not isinstance(exit_plan, dict):
         errors.append("exit_plan must be an object")
-
-
-def _decimal_or_none(value: Any) -> Decimal | None:
-    if value is None:
-        return None
-    try:
-        return Decimal(str(value))
-    except (InvalidOperation, ValueError):
-        return None

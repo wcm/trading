@@ -3,13 +3,15 @@ from __future__ import annotations
 import re
 from dataclasses import asdict, dataclass
 from datetime import UTC, date, datetime
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from trading_bot.brokers.alpaca import AlpacaClient
 from trading_bot.config import AppConfig
 from trading_bot.execution.orders import build_client_order_id, build_put_credit_spread_close_preview
+from trading_bot.utils.mapping import nested_get as _nested_get
+from trading_bot.utils.money import decimal_or_none as _decimal_or_none
 
 
 EASTERN = ZoneInfo("America/New_York")
@@ -352,22 +354,6 @@ def _money(value: Decimal | None, quantity: int) -> Decimal | None:
     if value is None:
         return None
     return value * Decimal("100") * Decimal(quantity)
-
-
-def _nested_get(mapping: dict[str, Any], *keys: str) -> Any:
-    for key in keys:
-        if key in mapping:
-            return mapping[key]
-    return None
-
-
-def _decimal_or_none(value: Any) -> Decimal | None:
-    if value is None:
-        return None
-    try:
-        return Decimal(str(value))
-    except (InvalidOperation, ValueError):
-        return None
 
 
 def _fmt_optional_decimal(value: Decimal | None) -> str | None:

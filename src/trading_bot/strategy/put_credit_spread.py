@@ -2,12 +2,17 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from datetime import UTC, date, datetime
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from trading_bot.brokers.alpaca import AlpacaClient
 from trading_bot.config import AppConfig
+from trading_bot.utils.mapping import nested_get as _nested_get
+from trading_bot.utils.market_time import age_seconds as _age_seconds
+from trading_bot.utils.market_time import parse_timestamp as _parse_time
+from trading_bot.utils.money import decimal_or_none as _decimal_or_none
+from trading_bot.utils.money import int_or_none as _int_or_none
 
 
 STRATEGY_NAME = "put_credit_spread"
@@ -341,52 +346,6 @@ def _short_put_distance_pct(underlying_price: Decimal | None, short_strike: Deci
     if underlying_price is None or underlying_price <= 0:
         return None
     return ((underlying_price - short_strike) / underlying_price) * Decimal("100")
-
-
-def _nested_get(mapping: dict[str, Any], *keys: str) -> Any:
-    for key in keys:
-        if key in mapping:
-            return mapping[key]
-    return None
-
-
-def _decimal_or_none(value: Any) -> Decimal | None:
-    if value is None:
-        return None
-    try:
-        return Decimal(str(value))
-    except (InvalidOperation, ValueError):
-        return None
-
-
-def _int_or_none(value: Any) -> int | None:
-    if value is None:
-        return None
-    try:
-        return int(Decimal(str(value)))
-    except (InvalidOperation, ValueError):
-        return None
-
-
-def _parse_time(value: Any) -> datetime | None:
-    if not value:
-        return None
-    try:
-        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=UTC)
-    return parsed.astimezone(UTC)
-
-
-def _age_seconds(now: datetime, timestamp: datetime | None) -> int | None:
-    if timestamp is None:
-        return None
-    age = int((now - timestamp).total_seconds())
-    if -60 <= age < 0:
-        return 0
-    return age
 
 
 def _max_optional_int(*values: int | None) -> int | None:

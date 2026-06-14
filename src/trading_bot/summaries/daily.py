@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import logging
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
@@ -18,7 +17,7 @@ from trading_bot.storage.db import (
     summarize_order_status_events,
 )
 from trading_bot.utils.artifacts import write_json_artifact
-from trading_bot.utils.market_time import EASTERN, daily_summary_date_from_arg, eastern_date_window_utc
+from trading_bot.utils.market_time import daily_summary_date_from_arg, eastern_date_window_utc
 from trading_bot.utils.money import decimal_or_none, format_optional_decimal, sum_decimal_strings
 
 

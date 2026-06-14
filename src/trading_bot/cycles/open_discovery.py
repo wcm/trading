@@ -7,7 +7,6 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import replace
 from datetime import UTC, datetime
-from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, TextIO
 
@@ -36,6 +35,7 @@ from trading_bot.storage.db import (
 from trading_bot.strategy.put_credit_spread import scan_put_credit_spreads
 from trading_bot.config import resolve_path
 from trading_bot.utils.artifacts import write_json_artifact
+from trading_bot.utils.money import decimal_or_none as _decimal_or_none
 from trading_bot.utils.symbols import watchlist_symbols_from_args_or_config
 
 
@@ -1031,15 +1031,6 @@ def _unique_reasons(reasons: Any) -> list[str]:
         seen.add(text)
         result.append(text)
     return result
-
-
-def _decimal_or_none(value: Any) -> Decimal | None:
-    if value is None:
-        return None
-    try:
-        return Decimal(str(value))
-    except (InvalidOperation, ValueError):
-        return None
 
 
 def _load_prompt_text(prompt_version: str) -> str:

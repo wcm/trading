@@ -1,7 +1,10 @@
 from __future__ import annotations
 
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from typing import Any
+
+from trading_bot.utils.money import decimal_or_none as _decimal_or_none
+from trading_bot.utils.money import format_decimal as _fmt_decimal
 
 
 def build_allocation_summary(config: Any, decision_artifacts: list[dict[str, Any]]) -> dict[str, Any]:
@@ -122,16 +125,3 @@ def _preview_limit_price(order_preview: Any) -> Any:
     if not isinstance(payload, dict):
         return None
     return payload.get("limit_price")
-
-
-def _decimal_or_none(value: Any) -> Decimal | None:
-    if value is None:
-        return None
-    try:
-        return Decimal(str(value))
-    except (InvalidOperation, ValueError):
-        return None
-
-
-def _fmt_decimal(value: Decimal) -> str:
-    return f"{value.normalize():f}"
