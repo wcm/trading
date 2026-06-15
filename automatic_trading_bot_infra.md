@@ -1,11 +1,15 @@
 # Automatic Trading Bot Infrastructure Plan
 
-Last updated: 2026-06-10
+Last updated: 2026-06-14
 Status: Cloud paper trading, shared-infrastructure design in progress
 
 This document describes the shared infrastructure for the automatic trading bot.
-Strategy-specific rules live outside this file. For the current put credit
-spread strategy, see [strategy/put_credit_strategy.md](strategy/put_credit_strategy.md).
+Strategy-specific rules live outside this file:
+
+- Current put credit spread strategy:
+  [strategy/put_credit_strategy.md](strategy/put_credit_strategy.md)
+- Proposed TQQQ grid strategy:
+  [strategy/grid_strategy.md](strategy/grid_strategy.md)
 
 Operational commands, cloud deployment steps, log viewing, and emergency
 procedures live in [automatic_trading_bot_runbook.md](automatic_trading_bot_runbook.md).
