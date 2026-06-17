@@ -203,6 +203,83 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional path to write the daily summary artifact JSON.",
     )
 
+    backtest_grid = subparsers.add_parser(
+        "backtest-grid",
+        help="Run a deterministic TQQQ-style grid backtest.",
+    )
+    _add_grid_backtest_common_args(backtest_grid)
+    backtest_grid.add_argument(
+        "--json-output",
+        help="Optional path to write the full backtest JSON artifact.",
+    )
+    backtest_grid.add_argument(
+        "--trades-csv",
+        help="Optional path to write all simulated trades as CSV.",
+    )
+
+    sweep_grid = subparsers.add_parser(
+        "sweep-grid",
+        help="Run a grid parameter sweep over spacing, order size, and inventory limits.",
+    )
+    _add_grid_backtest_common_args(sweep_grid)
+    sweep_grid.add_argument(
+        "--grid-spacing-pcts",
+        default="0.80,2.00,3.00,5.00,8.00",
+        help="Comma-separated grid spacing percentages to test.",
+    )
+    sweep_grid.add_argument(
+        "--base-order-notionals",
+        default="500",
+        help="Comma-separated per-buy dollar notionals to test.",
+    )
+    sweep_grid.add_argument(
+        "--max-inventory-values",
+        default="8000",
+        help="Comma-separated max inventory values to test.",
+    )
+    sweep_grid.add_argument(
+        "--adaptive-scale-factors",
+        help="Comma-separated adaptive sizing scale factors to test. Use 0 for fixed sizing.",
+    )
+    sweep_grid.add_argument(
+        "--csv-output",
+        help="Optional path to write sweep summary CSV.",
+    )
+    sweep_grid.add_argument(
+        "--markdown-output",
+        help="Optional path to write sweep summary Markdown.",
+    )
+    sweep_grid.add_argument(
+        "--json-output",
+        help="Optional path to write full sweep JSON artifact.",
+    )
+
+    grid_cycle = subparsers.add_parser(
+        "grid-cycle",
+        help="Run one TQQQ grid bot cycle with optional paper order submission.",
+    )
+    _add_grid_cycle_common_args(grid_cycle)
+
+    grid_scheduler = subparsers.add_parser(
+        "grid-schedule-local",
+        help="Run the TQQQ grid bot loop locally during market hours.",
+    )
+    _add_grid_cycle_common_args(grid_scheduler)
+    grid_scheduler.add_argument(
+        "--interval-minutes",
+        type=float,
+        help="Minutes between grid cycles. Defaults to runtime.grid_scheduler_interval_minutes.",
+    )
+    grid_scheduler.add_argument(
+        "--json-output-dir",
+        help="Optional directory for timestamped grid cycle JSON artifacts.",
+    )
+    grid_scheduler.add_argument(
+        "--once",
+        action="store_true",
+        help="Run one scheduler check and exit. Useful for validation.",
+    )
+
     scheduler = subparsers.add_parser(
         "schedule-local",
         help="Run position monitoring every tick and new-open discovery on a slower cadence.",
@@ -297,3 +374,144 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     return parser
+
+
+def _add_grid_backtest_common_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--symbol",
+        help="Symbol to backtest. Defaults to grid_strategy.symbol.",
+    )
+    parser.add_argument(
+        "--timeframe",
+        default="1Day",
+        help="Historical bar timeframe. Use 1Day for the first daily backtest.",
+    )
+    parser.add_argument(
+        "--start",
+        default="2010-02-11",
+        help="Backtest start date in YYYY-MM-DD format.",
+    )
+    parser.add_argument(
+        "--end",
+        default="2026-06-17",
+        help="Backtest end date in YYYY-MM-DD format.",
+    )
+    parser.add_argument(
+        "--data-source",
+        choices=["yahoo", "alpaca"],
+        default="yahoo",
+        help="Historical data source. Yahoo supports 1Day; Alpaca supports configured stock bars.",
+    )
+    parser.add_argument(
+        "--feed",
+        help="Alpaca stock data feed override when --data-source=alpaca.",
+    )
+    parser.add_argument(
+        "--cache-dir",
+        default="data/backtests/cache",
+        help="Directory for cached historical bars.",
+    )
+    parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="Download bars again instead of using/writing the local cache.",
+    )
+    parser.add_argument(
+        "--strategy-capital",
+        help="Starting cash for the simulated strategy.",
+    )
+    parser.add_argument(
+        "--grid-spacing-pct",
+        help="Grid spacing percentage for a single backtest.",
+    )
+    parser.add_argument(
+        "--base-order-notional",
+        help="Dollar notional per simulated buy.",
+    )
+    parser.add_argument(
+        "--max-buy-levels-below-anchor",
+        type=int,
+        help="Maximum buy levels below the active anchor.",
+    )
+    parser.add_argument(
+        "--max-inventory-value",
+        help="Maximum simulated inventory cost.",
+    )
+    parser.add_argument(
+        "--cash-reserve",
+        help="Cash reserve that simulated buys must preserve.",
+    )
+    parser.add_argument(
+        "--max-unrealized-loss",
+        help="Pause new buys once open unrealized loss reaches this amount. Use 'off' to disable.",
+    )
+    parser.add_argument(
+        "--pause-new-buys-after-consecutive-down-levels",
+        help="Pause new buys after this many consecutive buy levels without a sell. Use 'off' to disable.",
+    )
+    parser.add_argument(
+        "--recenter-up-pct",
+        help="When flat, move the grid anchor up after this percentage rise. Use 'off' to disable.",
+    )
+    parser.add_argument(
+        "--adaptive-sizing",
+        action="store_true",
+        help="Increase buy size as the buy level is farther below the anchor.",
+    )
+    parser.add_argument(
+        "--adaptive-scale-factor",
+        help="Adaptive sizing factor. Example: 5 means a 10%% drop increases size by 50%%.",
+    )
+    parser.add_argument(
+        "--adaptive-max-order-multiplier",
+        help="Hard cap for adaptive order size as a multiple of base order notional.",
+    )
+    parser.add_argument(
+        "--max-single-order-notional",
+        help="Hard dollar cap for one adaptive buy order.",
+    )
+    parser.add_argument(
+        "--allow-fractional-shares",
+        action="store_true",
+        help="Allow fractional simulated share quantities.",
+    )
+
+
+def _add_grid_cycle_common_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--timeframe",
+        help="Alpaca stock bar timeframe. Defaults to runtime.grid_timeframe.",
+    )
+    parser.add_argument(
+        "--feed",
+        help="Alpaca stock data feed override. Defaults to alpaca.stock_data_feed.",
+    )
+    parser.add_argument(
+        "--lookback-days",
+        type=int,
+        default=5,
+        help="Days of recent bars to request before selecting the latest bar.",
+    )
+    parser.add_argument(
+        "--state-path",
+        help="Path to the persistent grid state JSON. Defaults to storage.grid_state_path.",
+    )
+    parser.add_argument(
+        "--submit-paper",
+        action="store_true",
+        help="Submit paper limit orders for generated grid intents. Requires execution.enable_paper_orders=true.",
+    )
+    parser.add_argument(
+        "--send-discord",
+        action="store_true",
+        help="Send a compact Discord grid cycle summary.",
+    )
+    parser.add_argument(
+        "--json-output",
+        help="Optional path to write the grid cycle artifact JSON.",
+    )
+    parser.add_argument(
+        "--ignore-market-hours",
+        action="store_true",
+        help="Allow paper submission even when Alpaca reports the market is closed. Use only for testing.",
+    )

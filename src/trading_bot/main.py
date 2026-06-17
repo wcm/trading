@@ -8,6 +8,8 @@ from trading_bot.commands.basic import (
     run_smoke,
     run_watchlist_decisions,
 )
+from trading_bot.commands.backtesting import run_grid_backtest_command, run_grid_sweep_command
+from trading_bot.commands.grid import run_grid_cycle_command, run_grid_scheduler_command
 from trading_bot.orders.lifecycle import run_order_poll
 from trading_bot.scheduler.local import run_local_scheduler
 from trading_bot.summaries.daily import run_daily_summary
@@ -35,6 +37,14 @@ def main(argv: list[str] | None = None) -> int:
         return run_order_poll(args)
     if args.command == "daily-summary":
         return run_daily_summary(args)
+    if args.command == "backtest-grid":
+        return run_grid_backtest_command(args)
+    if args.command == "sweep-grid":
+        return run_grid_sweep_command(args)
+    if args.command == "grid-cycle":
+        return run_grid_cycle_command(args)
+    if args.command == "grid-schedule-local":
+        return run_grid_scheduler_command(args)
     if args.command == "schedule-local":
         return run_local_scheduler(args)
 

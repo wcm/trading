@@ -1,0 +1,60 @@
+mode: paper
+broker: alpaca
+
+alpaca:
+  trading_base_url: https://api.alpaca.markets
+  paper_base_url: https://paper-api.alpaca.markets
+  data_base_url: https://data.alpaca.markets
+  active_trading_base_url: https://paper-api.alpaca.markets
+  stock_data_feed: iex
+  request_timeout_seconds: 30
+  request_retries: 2
+  request_retry_backoff_seconds: 1
+
+grid_strategy:
+  name: grid_tqqq
+  symbol: TQQQ
+  reference_symbol: QQQ
+  grid_spacing_pct: 3.0
+  base_order_notional: 400
+  max_buy_levels_below_anchor: 16
+  take_profit_levels: 1
+  anchor_mode: first_bar_open
+  recenter_only_when_flat: true
+  recenter_up_pct: 5.0
+  allow_overnight_inventory: true
+
+grid_risk:
+  strategy_capital: 10000
+  max_inventory_value: 8000
+  cash_reserve: 2000
+  max_single_order_notional: 800
+  max_open_buy_orders: 16
+  max_open_sell_orders: 16
+  max_daily_realized_loss: 500
+  max_weekly_realized_loss: 1000
+  max_unrealized_loss: 1200
+  max_intraday_tqqq_drop_pct: 8.0
+  max_intraday_qqq_drop_pct: 3.0
+  pause_new_buys_after_consecutive_down_levels: 5
+
+adaptive_sizing:
+  enabled: true
+  scale_factor: 8.0
+  max_order_multiplier: 2.0
+  max_single_order_notional: 800
+
+storage:
+  sqlite_path: data/grid/trading_bot.sqlite3
+  grid_state_path: data/grid/grid_state.json
+
+execution:
+  enable_paper_orders: true
+  order_type: limit
+  no_market_orders: true
+
+runtime:
+  kill_switch_path: data/grid/KILL_SWITCH
+  log_dir: logs/grid
+  grid_timeframe: 5Min
+  grid_scheduler_interval_minutes: 1

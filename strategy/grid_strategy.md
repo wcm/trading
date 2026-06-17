@@ -1,12 +1,15 @@
 # TQQQ Grid Strategy Proposal
 
-Last updated: 2026-06-14
+Last updated: 2026-06-17
 
 This is the initial proposal for a separate paper-trading grid strategy using
 `TQQQ`. It is an engineering note for experimentation, not financial advice.
 
 Shared infrastructure details live in
 [../automatic_trading_bot_infra.md](../automatic_trading_bot_infra.md).
+
+Backtest build details live in
+[grid_backtest_plan.md](grid_backtest_plan.md).
 
 ## 1. Strategy Summary
 
@@ -95,7 +98,7 @@ grid_risk:
   strategy_capital: 10000
   max_inventory_value: 8000
   cash_reserve: 2000
-  max_single_order_notional: 500
+  max_single_order_notional: 800
   max_open_buy_orders: 16
   max_open_sell_orders: 16
   max_daily_realized_loss: 500
@@ -138,25 +141,36 @@ grid_strategy:
   name: grid_tqqq
   symbol: TQQQ
   reference_symbol: QQQ
-  grid_spacing_pct: 0.80
-  base_order_notional: 500
+  grid_spacing_pct: 3.0
+  base_order_notional: 400
   max_buy_levels_below_anchor: 16
   take_profit_levels: 1
   anchor_mode: session_start_price
   recenter_only_when_flat: true
+  recenter_up_pct: 5.0
   allow_overnight_inventory: true
   stop_new_buys_minutes_before_close: 15
   keep_sell_orders_after_new_buys_stop: true
+
+adaptive_sizing:
+  enabled: true
+  scale_factor: 8.0
+  max_order_multiplier: 2.0
+  max_single_order_notional: 800
 ```
 
 Plain English:
 
 - Start with one symbol: `TQQQ`.
 - Use QQQ as the calmer reference market.
-- Place grid levels roughly every `0.80%`.
-- Buy about `$500` at each lower level.
+- Place grid levels roughly every `3.0%`.
+- Start around `$400` per buy level.
+- Buy a little more when TQQQ has dropped farther from the grid anchor.
+- Never let one adaptive buy become more than `2x` the base amount.
 - Sell each bought lot one grid level higher.
-- Only rebuild the whole grid when we have no TQQQ position.
+- Only move the grid upward when we have no TQQQ position.
+- If TQQQ rises about `5.0%` while we are flat, move the grid anchor up instead
+  of buying immediately.
 - Allow overnight inventory for paper testing, but stop adding new buys near the
   end of the trading day.
 
@@ -173,6 +187,52 @@ pause rules are important.
 
 The bot should run during US market hours.
 
+Current v1 command:
+
+```bash
+uv run trading-bot \
+  --settings config/settings.grid.yaml \
+  --env .env.grid \
+  grid-cycle \
+  --json-output data/grid/grid_cycle_preview.json
+```
+
+To allow paper orders:
+
+```bash
+uv run trading-bot \
+  --settings config/settings.grid.yaml \
+  --env .env.grid \
+  grid-cycle \
+  --submit-paper \
+  --send-discord \
+  --json-output data/grid/grid_cycle_latest.json
+```
+
+To run it continuously during market hours:
+
+```bash
+uv run trading-bot \
+  --settings config/settings.grid.yaml \
+  --env .env.grid \
+  grid-schedule-local \
+  --submit-paper \
+  --send-discord \
+  --json-output-dir data/grid/cycles
+```
+
+This first bot version:
+
+- reads recent Alpaca `TQQQ` bars
+- stores grid state in `data/grid/grid_state.json`
+- uses the latest bar to initialize or update the grid anchor
+- reconciles any previous grid order IDs saved in the state file
+- creates buy/sell intents from deterministic grid rules
+- sends paper limit orders only when `--submit-paper` is used and the market is open
+- can run continuously with `grid-schedule-local`
+- sleeps until Alpaca's next market open when the market is closed
+- never sends market orders
+
 Every minute:
 
 1. Fetch current TQQQ price.
@@ -180,13 +240,39 @@ Every minute:
 3. Check grid risk gates.
 4. Check current TQQQ position and open orders.
 5. If flat and no grid exists, create a new grid around the anchor price.
-6. If price reaches a lower buy level, place a small buy limit order.
-7. If a buy fills, place the paired sell limit order one grid level higher.
-8. If new buys are paused, do not place new buy orders, but continue managing
+6. If flat and price rises enough above the anchor, move the anchor up.
+7. If price reaches a lower buy level, place a small buy limit order.
+8. If a buy fills, place the paired sell limit order one grid level higher.
+9. If new buys are paused, do not place new buy orders, but continue managing
    sell orders and inventory.
 
 The first version should not ask the LLM to choose every order. The grid order
 rules should be deterministic.
+
+Plain English:
+
+```text
+Buy dips.
+Sell rebounds.
+If TQQQ runs upward while we own nothing, move the grid upward.
+Do not buy just because price went up.
+```
+
+Adaptive sizing formula:
+
+```text
+buy amount = base amount * (1 + scale factor * drop from anchor)
+```
+
+Example with `$400` base and scale factor `8.0`:
+
+```text
+3% drop:  400 * (1 + 8 * 0.03) = about $496
+6% drop:  400 * (1 + 8 * 0.06) = about $592
+10% drop: 400 * (1 + 8 * 0.10) = about $720
+```
+
+The `2x` cap means a single buy cannot exceed about `$800`.
 
 ## 7. Close / Sell Logic
 
@@ -195,9 +281,9 @@ Each filled buy should create a sell target.
 Example:
 
 ```text
-Buy TQQQ at 100.00
-Grid spacing is 0.80%
-Sell target is about 100.80
+Buy TQQQ at 95.00
+Grid spacing is 5.0%
+Sell target is about 99.75
 ```
 
 The bot should track each filled lot.
@@ -271,7 +357,7 @@ The most important daily summary fields:
 
 ## 10. Implementation Phases
 
-### Phase 1: Read-Only Grid Preview
+### Phase 1: Read-Only Grid Preview - Done
 
 Build the grid calculator without placing orders.
 
@@ -284,7 +370,13 @@ It should show:
 - current risk status
 - what the bot would do now
 
-### Phase 2: Paper Orders, Small Size
+Implemented with:
+
+```bash
+uv run trading-bot --settings config/settings.grid.yaml grid-cycle
+```
+
+### Phase 2: Paper Orders, Small Size - Started
 
 Enable paper orders using the new paper account.
 
@@ -297,6 +389,14 @@ Start with:
 - separate SQLite database
 - separate logs
 - separate Discord title prefix
+
+Current status:
+
+- `grid-cycle --submit-paper` can submit paper limit orders
+- buy order fills are reconciled into open grid lots
+- open lots can create paired sell limit orders
+- sell fills record realized P&L inside the grid state file
+- `grid-schedule-local` can run the cycle every minute during market hours
 
 ### Phase 3: Monitoring And Reporting
 
@@ -316,27 +416,15 @@ Add LLM only after deterministic grid behavior is correct.
 The LLM should decide whether market/news conditions are too strange for new
 buys, but it should not create orders directly.
 
-## 11. First Decisions To Make
-
-Before coding, we should confirm:
-
-1. Should v1 allow overnight TQQQ inventory?
-2. Should the first paper capital cap be `$10,000`, or should it use the full
-   paper account?
-3. Is `$500` per buy level aggressive enough for the first test?
-4. Should the same Discord webhook be used, with titles clearly saying `Grid`,
-   or should grid have its own webhook/channel?
-5. Should the LLM news gate be added immediately, or after the deterministic
-   grid is proven in paper?
-
-My default recommendation:
+## 11. Current Starting Decision
 
 ```text
 Use separate config/account/state.
 Start TQQQ only.
 Allow overnight inventory in paper.
 Use $10,000 strategy capital.
-Use $500 per grid buy.
-Use 0.80% grid spacing.
+Use $400 base grid buys with adaptive sizing.
+Use 3.0% grid spacing based on the first 1-month, 3-month, and 6-month
+intraday backtest comparisons.
 Add LLM as a phase 2/3 risk pause layer, not as the first order engine.
 ```
