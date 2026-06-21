@@ -1,4 +1,4 @@
-# TQQQ Grid Strategy Proposal
+# TQQQ Grid Strategy Proposal (v1)
 
 Last updated: 2026-06-17
 
