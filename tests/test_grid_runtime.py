@@ -51,7 +51,7 @@ def test_grid_cycle_blocks_new_buys_after_active_down_level_cap() -> None:
                 buy_price=Decimal("90"),
                 sell_target=Decimal("92.70"),
                 planned_notional=Decimal("400"),
-                status="open",
+                status="sell_submitted",
                 qty=Decimal("4"),
                 buy_fill_price=Decimal("90"),
             )
@@ -64,7 +64,7 @@ def test_grid_cycle_blocks_new_buys_after_active_down_level_cap() -> None:
     assert {item["reason"] for item in plan.blocked} == {"consecutive_down_levels"}
 
 
-def test_grid_cycle_prefers_sell_intent_and_skips_same_cycle_buys() -> None:
+def test_grid_cycle_places_paired_sell_immediately_and_skips_same_cycle_buys() -> None:
     state = GridState(strategy_name="grid_tqqq", symbol="TQQQ", anchor_price=Decimal("100"))
     state.lots.append(
         GridLotState(
@@ -79,11 +79,12 @@ def test_grid_cycle_prefers_sell_intent_and_skips_same_cycle_buys() -> None:
         )
     )
 
-    plan = build_grid_plan(state, _config(), _bar(open_="98", high="100", low="94", close="96"))
+    plan = build_grid_plan(state, _config(), _bar(open_="98", high="98", low="94", close="96"))
 
     assert len(plan.intents) == 1
     assert plan.intents[0].action == "sell"
     assert plan.intents[0].lot_id == "lot-1"
+    assert plan.intents[0].price == Decimal("99.91")
     assert "new buys are skipped" in plan.events[-1]
 
 

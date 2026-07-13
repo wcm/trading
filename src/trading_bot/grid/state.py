@@ -32,6 +32,7 @@ class GridLotState:
     sell_submitted_at: str | None = None
     sell_filled_at: str | None = None
     sell_fill_price: Decimal | None = None
+    sell_filled_qty: Decimal | None = None
     realized_pnl: Decimal | None = None
     last_order_status: str | None = None
     notes: list[str] = field(default_factory=list)
@@ -43,14 +44,22 @@ class GridLotState:
         return self.status in OPEN_LOT_STATUSES
 
     def cost_basis(self) -> Decimal:
+        if self.status == "buy_submitted":
+            return self.planned_notional
         if self.qty is not None and self.buy_fill_price is not None:
-            return self.qty * self.buy_fill_price
+            return self.remaining_qty() * self.buy_fill_price
         return self.planned_notional
+
+    def remaining_qty(self) -> Decimal:
+        qty = self.qty or Decimal("0")
+        if self.status == "sell_submitted" and self.sell_filled_qty is not None:
+            return max(Decimal("0"), qty - self.sell_filled_qty)
+        return qty
 
     def unrealized_pnl(self, mark_price: Decimal) -> Decimal:
         if self.qty is None or self.buy_fill_price is None or not self.has_open_inventory():
             return Decimal("0")
-        return (mark_price - self.buy_fill_price) * self.qty
+        return (mark_price - self.buy_fill_price) * self.remaining_qty()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -72,6 +81,7 @@ class GridLotState:
             "sell_submitted_at": self.sell_submitted_at,
             "sell_filled_at": self.sell_filled_at,
             "sell_fill_price": _fmt_optional_decimal(self.sell_fill_price),
+            "sell_filled_qty": _fmt_optional_decimal(self.sell_filled_qty),
             "realized_pnl": _fmt_optional_decimal(self.realized_pnl),
             "last_order_status": self.last_order_status,
             "notes": list(self.notes),
@@ -98,6 +108,7 @@ class GridLotState:
             sell_submitted_at=_optional_str(data.get("sell_submitted_at")),
             sell_filled_at=_optional_str(data.get("sell_filled_at")),
             sell_fill_price=_optional_decimal(data.get("sell_fill_price")),
+            sell_filled_qty=_optional_decimal(data.get("sell_filled_qty")),
             realized_pnl=_optional_decimal(data.get("realized_pnl")),
             last_order_status=_optional_str(data.get("last_order_status")),
             notes=[str(item) for item in data.get("notes", [])],

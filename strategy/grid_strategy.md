@@ -98,14 +98,7 @@ grid_risk:
   strategy_capital: 10000
   max_inventory_value: 8000
   cash_reserve: 2000
-  max_single_order_notional: 800
-  max_open_buy_orders: 16
-  max_open_sell_orders: 16
-  max_daily_realized_loss: 500
-  max_weekly_realized_loss: 1000
   max_unrealized_loss: 1200
-  max_intraday_tqqq_drop_pct: 8.0
-  max_intraday_qqq_drop_pct: 3.0
   pause_new_buys_after_consecutive_down_levels: 5
 ```
 
@@ -114,9 +107,10 @@ Plain English:
 - The grid can use up to about `$10,000` of paper capital.
 - It should not hold more than about `$8,000` of TQQQ inventory.
 - It keeps about `$2,000` in reserve.
-- Each buy order is small, around `$500`.
+- Each buy order starts around `$400` and grows on deeper levels, capped at `$800`.
 - If losses are too large, it stops opening new buys.
-- If TQQQ or QQQ is falling too hard today, it stops opening new buys.
+- The daily/weekly loss and TQQQ/QQQ crash gates remain planned work. They are
+  not enforced during the first supervised paper test.
 
 Important distinction:
 
@@ -140,17 +134,14 @@ Recommended v1 settings:
 grid_strategy:
   name: grid_tqqq
   symbol: TQQQ
-  reference_symbol: QQQ
   grid_spacing_pct: 3.0
   base_order_notional: 400
   max_buy_levels_below_anchor: 16
   take_profit_levels: 1
-  anchor_mode: session_start_price
+  anchor_mode: latest_bar_close
   recenter_only_when_flat: true
   recenter_up_pct: 5.0
   allow_overnight_inventory: true
-  stop_new_buys_minutes_before_close: 15
-  keep_sell_orders_after_new_buys_stop: true
 
 adaptive_sizing:
   enabled: true
@@ -162,7 +153,6 @@ adaptive_sizing:
 Plain English:
 
 - Start with one symbol: `TQQQ`.
-- Use QQQ as the calmer reference market.
 - Place grid levels roughly every `3.0%`.
 - Start around `$400` per buy level.
 - Buy a little more when TQQQ has dropped farther from the grid anchor.
@@ -171,8 +161,8 @@ Plain English:
 - Only move the grid upward when we have no TQQQ position.
 - If TQQQ rises about `5.0%` while we are flat, move the grid anchor up instead
   of buying immediately.
-- Allow overnight inventory for paper testing, but stop adding new buys near the
-  end of the trading day.
+- Allow overnight inventory for paper testing. An end-of-day new-buy cutoff is
+  planned but not implemented yet.
 
 Why allow overnight inventory in v1?
 
@@ -236,14 +226,14 @@ This first bot version:
 Every minute:
 
 1. Fetch current TQQQ price.
-2. Fetch QQQ reference price and trend.
-3. Check grid risk gates.
-4. Check current TQQQ position and open orders.
-5. If flat and no grid exists, create a new grid around the anchor price.
-6. If flat and price rises enough above the anchor, move the anchor up.
-7. If price reaches a lower buy level, place a small buy limit order.
-8. If a buy fills, place the paired sell limit order one grid level higher.
-9. If new buys are paused, do not place new buy orders, but continue managing
+2. Reconcile the real Alpaca TQQQ position and open orders with local grid state.
+3. Check the currently implemented grid risk gates.
+4. If flat and no grid exists, create a new grid around the latest bar close.
+5. If flat and price rises enough above the anchor, move the anchor up.
+6. If price reaches a lower buy level, place a small `DAY` buy limit order.
+7. If a buy fills, place the paired `GTC` sell limit immediately, one grid
+   level higher.
+8. If new buys are paused, do not place new buy orders, but continue managing
    sell orders and inventory.
 
 The first version should not ask the LLM to choose every order. The grid order
@@ -282,8 +272,8 @@ Example:
 
 ```text
 Buy TQQQ at 95.00
-Grid spacing is 5.0%
-Sell target is about 99.75
+Grid spacing is 3.0%
+Sell target is about 97.85
 ```
 
 The bot should track each filled lot.
@@ -294,6 +284,13 @@ When the paired sell fills:
 - send a Discord fill message
 - free up inventory budget
 - allow the next lower buy level if risk gates still pass
+
+Order duration:
+
+- triggered buy orders use `DAY` and expire at that trading day's close if unfilled
+- paired profit-taking sells use `GTC` and remain open across trading days;
+  Alpaca currently expires GTC orders after 90 days, after which the bot can
+  recreate the paired sell on its next market cycle
 
 ## 8. LLM Role
 
@@ -333,14 +330,18 @@ by hard risk rules, there is no reason to pay for an LLM call.
 
 Keep messages short and easy to scan.
 
-Suggested message titles:
+Implemented event message titles:
 
-- `Grid Started`
 - `Grid Buy Filled`
 - `Grid Sell Filled`
-- `Grid Paused`
-- `Grid Risk Limit Hit`
-- `Grid Daily Summary`
+- `Grid Buy Submitted`
+- `Grid Sell Submitted`
+- `Grid Buy/Sell Partially Filled`
+- `Grid Buy/Sell Canceled`, `Expired`, or `Rejected`
+- `Grid Safety Block`
+- `Grid Bot Error`
+
+Quiet cycles do not send Discord messages.
 
 The most important daily summary fields:
 
@@ -397,6 +398,8 @@ Current status:
 - open lots can create paired sell limit orders
 - sell fills record realized P&L inside the grid state file
 - `grid-schedule-local` can run the cycle every minute during market hours
+- the runtime fails closed if Alpaca TQQQ positions/orders disagree with local state
+- paired sells are submitted immediately as `GTC` orders after buy fills
 
 ### Phase 3: Monitoring And Reporting
 
@@ -409,14 +412,64 @@ Add:
 - pause/resume reasons
 - inventory age
 
-### Phase 4: Optional LLM News Gate
+Event-only order and safety notifications are implemented. The daily grid
+summary remains future work.
+
+## 11. Local Paper Test
+
+Archive any state left by an older account before the first run:
+
+```bash
+mv data/grid/grid_state.json data/grid/grid_state.before-new-account.json
+```
+
+Run a read-only preview:
+
+```bash
+uv run trading-bot \
+  --settings config/settings.grid.yaml \
+  --env .env.grid \
+  grid-cycle \
+  --json-output data/grid/grid_cycle_preview.json
+```
+
+Start supervised paper execution:
+
+```bash
+uv run trading-bot \
+  --settings config/settings.grid.yaml \
+  --env .env.grid \
+  grid-schedule-local \
+  --submit-paper \
+  --send-discord \
+  --json-output-dir data/grid/cycles
+```
+
+Use only one scheduler process for this account.
+
+## 12. Separate Grid Container
+
+The grid bot has its own Compose file and does not use the options bot's
+`.env` or `settings.yaml`:
+
+```bash
+docker compose -f docker-compose.grid.yml build
+docker compose -f docker-compose.grid.yml run --rm grid-bot \
+  uv run --no-sync trading-bot \
+  --settings config/settings.grid.yaml \
+  smoke --check-alpaca --send-discord
+docker compose -f docker-compose.grid.yml up -d
+docker compose -f docker-compose.grid.yml logs -f grid-bot
+```
+
+## 13. Optional LLM News Gate
 
 Add LLM only after deterministic grid behavior is correct.
 
 The LLM should decide whether market/news conditions are too strange for new
 buys, but it should not create orders directly.
 
-## 11. Current Starting Decision
+## 14. Current Starting Decision
 
 ```text
 Use separate config/account/state.

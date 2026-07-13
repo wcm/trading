@@ -1,0 +1,24 @@
+services:
+  grid-bot:
+    build: .
+    image: trading-bot:grid-paper
+    restart: unless-stopped
+    env_file:
+      - .env.grid
+    volumes:
+      - ./config/settings.grid.yaml:/app/config/settings.grid.yaml:ro
+      - ./data/grid:/app/data/grid
+      - ./logs/grid:/app/logs/grid
+    command:
+      - uv
+      - run
+      - --no-sync
+      - trading-bot
+      - --settings
+      - config/settings.grid.yaml
+      - grid-schedule-local
+      - --submit-paper
+      - --send-discord
+      - --json-output-dir
+      - data/grid/cycles
+    stop_grace_period: 30s

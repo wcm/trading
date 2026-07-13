@@ -123,7 +123,7 @@ def build_grid_plan(state: GridState, config: GridStrategyConfig, bar: PriceBar)
     for lot in state.open_inventory_lots():
         if lot.status != "open":
             continue
-        if bar.high < lot.sell_target or lot.qty is None:
+        if lot.qty is None or lot.qty <= 0:
             continue
         intents.append(
             GridIntent(
@@ -133,7 +133,7 @@ def build_grid_plan(state: GridState, config: GridStrategyConfig, bar: PriceBar)
                 qty=lot.qty,
                 notional=lot.sell_target * lot.qty,
                 lot_id=lot.lot_id,
-                reason=f"bar high {bar.high} reached sell target {lot.sell_target}",
+                reason=f"place paired profit-taking sell at {lot.sell_target}",
             )
         )
 

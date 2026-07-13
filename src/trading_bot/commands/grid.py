@@ -14,14 +14,19 @@ from trading_bot.brokers.alpaca import AlpacaClient, AlpacaCredentialsError
 from trading_bot.config import AppConfig, resolve_path
 from trading_bot.execution.orders import build_client_order_id
 from trading_bot.grid.state import GridLotState, load_grid_state, save_grid_state
+from trading_bot.grid.reconciliation import (
+    grid_reconciliation_errors,
+    load_grid_broker_snapshot,
+)
+from trading_bot.grid.notifications import send_grid_error, send_grid_event_notifications
 from trading_bot.grid.strategy import (
     GridIntent,
+    GridPlan,
     GridStrategyConfig,
     build_grid_plan,
     grid_config_from_app_config,
     lot_from_buy_intent,
 )
-from trading_bot.notifications.discord import DiscordNotifier
 from trading_bot.utils.artifacts import write_json_artifact
 from trading_bot.utils.money import decimal_or_none, format_decimal
 
@@ -40,12 +45,16 @@ def run_grid_cycle_command(args: argparse.Namespace) -> int:
         alpaca = AlpacaClient.from_config(config)
     except AlpacaCredentialsError as exc:
         logger.error("%s", exc)
+        if args.send_discord:
+            send_grid_error(notifier, logger, error=str(exc))
         return 1
 
     try:
         bar = _fetch_latest_grid_bar(args, config, alpaca, strategy_config.symbol)
     except Exception as exc:  # noqa: BLE001 - report API/data failures cleanly in CLI
         logger.exception("Grid cycle failed while loading bars: %s", exc)
+        if args.send_discord:
+            send_grid_error(notifier, logger, error=f"Could not load market data: {exc}")
         return 1
 
     state = load_grid_state(
@@ -64,26 +73,64 @@ def run_grid_cycle_command(args: argparse.Namespace) -> int:
         )
     except Exception as exc:  # noqa: BLE001 - keep the state safe if Alpaca has a transient issue
         logger.exception("Grid order reconciliation failed: %s", exc)
+        if args.send_discord:
+            send_grid_error(notifier, logger, error=f"Could not check existing orders: {exc}")
         return 1
 
-    plan = build_grid_plan(state, strategy_config, bar)
+    try:
+        broker_snapshot = load_grid_broker_snapshot(alpaca, symbol=strategy_config.symbol)
+        safety_errors = grid_reconciliation_errors(state, broker_snapshot)
+        if safety_errors:
+            retry_events = _reconcile_grid_orders(
+                alpaca=alpaca,
+                state=state,
+                strategy_config=strategy_config,
+                logger=logger,
+            )
+            reconciliation_events.extend(retry_events)
+            broker_snapshot = load_grid_broker_snapshot(alpaca, symbol=strategy_config.symbol)
+            safety_errors = grid_reconciliation_errors(state, broker_snapshot)
+    except Exception as exc:  # noqa: BLE001 - fail closed if broker state is uncertain
+        logger.exception("Grid broker-state check failed: %s", exc)
+        if args.send_discord:
+            send_grid_error(notifier, logger, error=f"Could not verify Alpaca account state: {exc}")
+        return 1
+
+    if safety_errors:
+        for error in safety_errors:
+            logger.error("Grid safety block: %s", error)
+        plan = GridPlan(
+            intents=[],
+            blocked=[{"reason": "broker_state_mismatch", "details": safety_errors}],
+            events=["Broker and local grid state do not match"],
+        )
+    else:
+        plan = build_grid_plan(state, strategy_config, bar)
     market_open = _market_is_open(args, alpaca, logger)
     execution_allowed, execution_reason = _execution_allowed(
         args=args,
         config=config,
         kill_switch_active=kill_switch.is_active(),
         market_open=market_open,
+        safety_errors=safety_errors,
     )
 
     submitted_orders: list[dict[str, Any]] = []
     if args.submit_paper and execution_allowed:
-        submitted_orders = _submit_grid_intents(
-            alpaca=alpaca,
-            state=state,
-            strategy_config=strategy_config,
-            intents=plan.intents,
-            logger=logger,
-        )
+        try:
+            submitted_orders = _submit_grid_intents(
+                alpaca=alpaca,
+                state=state,
+                strategy_config=strategy_config,
+                intents=plan.intents,
+                logger=logger,
+            )
+        except Exception as exc:  # noqa: BLE001 - persist any successfully submitted earlier orders
+            save_grid_state(state_path, state)
+            logger.exception("Grid order submission failed: %s", exc)
+            if args.send_discord:
+                send_grid_error(notifier, logger, error=f"Order submission failed: {exc}")
+            return 1
     elif args.submit_paper:
         logger.warning("Grid paper submission skipped: %s", execution_reason)
 
@@ -102,6 +149,8 @@ def run_grid_cycle_command(args: argparse.Namespace) -> int:
         "execution_reason": execution_reason,
         "market_open": market_open,
         "reconciliation_events": reconciliation_events,
+        "broker_snapshot": broker_snapshot.to_dict(),
+        "safety_errors": safety_errors,
         "plan": plan.to_dict(),
         "submitted_orders": submitted_orders,
         "state": state.summary(mark_price=bar.close),
@@ -111,7 +160,7 @@ def run_grid_cycle_command(args: argparse.Namespace) -> int:
     if args.json_output:
         write_json_artifact(args.json_output, artifact, logger, "grid cycle")
     if args.send_discord:
-        _send_grid_cycle_discord(notifier, artifact, logger)
+        send_grid_event_notifications(notifier, artifact, logger)
     return 0
 
 
@@ -222,49 +271,126 @@ def _reconcile_buy_order(
     strategy_config: GridStrategyConfig,
 ) -> dict[str, Any] | None:
     status = str(order.get("status") or "").lower()
-    if not status or status == lot.last_order_status:
+    filled_qty = decimal_or_none(order.get("filled_qty")) or Decimal("0")
+    if not status:
+        return None
+    if status == lot.last_order_status and (
+        status != "partially_filled" or filled_qty == (lot.qty or Decimal("0"))
+    ):
         return None
     lot.last_order_status = status
+    fill_price = decimal_or_none(order.get("filled_avg_price")) or lot.buy_price
+    if status in {FILLED_ORDER_STATUS, "partially_filled"}:
+        if status == FILLED_ORDER_STATUS and filled_qty <= 0:
+            filled_qty = decimal_or_none(order.get("qty")) or Decimal("0")
+        _apply_buy_fill(lot, strategy_config, qty=filled_qty, fill_price=fill_price)
     if status == FILLED_ORDER_STATUS:
-        qty = decimal_or_none(order.get("filled_qty")) or decimal_or_none(order.get("qty"))
-        fill_price = decimal_or_none(order.get("filled_avg_price")) or lot.buy_price
-        if qty is None:
-            qty = Decimal("0")
-        lot.qty = qty
-        lot.buy_fill_price = fill_price
         lot.buy_filled_at = str(order.get("filled_at") or datetime.now(UTC).isoformat())
         lot.status = "open"
-        spacing = strategy_config.grid_spacing_pct / Decimal("100")
-        lot.sell_target = (fill_price * (Decimal("1") + spacing)).quantize(Decimal("0.01"))
     elif status in INACTIVE_ORDER_STATUSES:
-        lot.status = f"buy_{status}"
+        if filled_qty > 0:
+            _apply_buy_fill(lot, strategy_config, qty=filled_qty, fill_price=fill_price)
+            lot.status = "open"
+            lot.notes.append(f"Buy order became {status} after a partial fill")
+        else:
+            lot.status = f"buy_{status}"
     else:
-        return {"lot_id": lot.lot_id, "side": "buy", "order_status": status}
-    return {"lot_id": lot.lot_id, "side": "buy", "order_status": status, "lot_status": lot.status}
+        return {
+            "lot_id": lot.lot_id,
+            "level_index": lot.level_index,
+            "side": "buy",
+            "order_status": status,
+            "filled_qty": format_decimal(filled_qty),
+            "fill_price": format_decimal(fill_price),
+        }
+    return {
+        "lot_id": lot.lot_id,
+        "level_index": lot.level_index,
+        "side": "buy",
+        "order_status": status,
+        "lot_status": lot.status,
+        "filled_qty": format_decimal(filled_qty),
+        "fill_price": format_decimal(fill_price),
+        "sell_target": format_decimal(lot.sell_target),
+    }
+
+
+def _apply_buy_fill(
+    lot: GridLotState,
+    strategy_config: GridStrategyConfig,
+    *,
+    qty: Decimal,
+    fill_price: Decimal,
+) -> None:
+    lot.qty = qty
+    lot.buy_fill_price = fill_price
+    spacing = strategy_config.grid_spacing_pct / Decimal("100")
+    lot.sell_target = (fill_price * (Decimal("1") + spacing)).quantize(Decimal("0.01"))
 
 
 def _reconcile_sell_order(lot: GridLotState, order: dict[str, Any]) -> dict[str, Any] | None:
     status = str(order.get("status") or "").lower()
-    if not status or status == lot.last_order_status:
+    filled_qty = decimal_or_none(order.get("filled_qty")) or Decimal("0")
+    if not status:
+        return None
+    if status == lot.last_order_status and (
+        status != "partially_filled"
+        or filled_qty == (lot.sell_filled_qty or Decimal("0"))
+    ):
         return None
     lot.last_order_status = status
-    if status == FILLED_ORDER_STATUS:
-        qty = decimal_or_none(order.get("filled_qty")) or lot.qty or Decimal("0")
-        fill_price = decimal_or_none(order.get("filled_avg_price")) or lot.sell_target
-        buy_price = lot.buy_fill_price or lot.buy_price
+    fill_price = decimal_or_none(order.get("filled_avg_price")) or lot.sell_target
+    buy_price = lot.buy_fill_price or lot.buy_price
+    if status == "partially_filled":
+        lot.sell_filled_qty = filled_qty
         lot.sell_fill_price = fill_price
+        return {
+            "lot_id": lot.lot_id,
+            "level_index": lot.level_index,
+            "side": "sell",
+            "order_status": status,
+            "filled_qty": format_decimal(filled_qty),
+            "remaining_qty": format_decimal(lot.remaining_qty()),
+            "fill_price": format_decimal(fill_price),
+        }
+    if status == FILLED_ORDER_STATUS:
+        qty = filled_qty or lot.qty or Decimal("0")
+        lot.sell_fill_price = fill_price
+        lot.sell_filled_qty = qty
         lot.sell_filled_at = str(order.get("filled_at") or datetime.now(UTC).isoformat())
-        lot.realized_pnl = (fill_price - buy_price) * qty
+        lot.realized_pnl = (lot.realized_pnl or Decimal("0")) + (fill_price - buy_price) * qty
         lot.status = "closed"
     elif status in INACTIVE_ORDER_STATUSES:
-        lot.status = "open"
+        if filled_qty > 0:
+            lot.sell_fill_price = fill_price
+            lot.realized_pnl = (lot.realized_pnl or Decimal("0")) + (
+                fill_price - buy_price
+            ) * filled_qty
+            lot.qty = max(Decimal("0"), (lot.qty or Decimal("0")) - filled_qty)
+        lot.sell_filled_qty = None
+        lot.status = "open" if (lot.qty or Decimal("0")) > 0 else "closed"
         lot.sell_order_id = None
         lot.sell_client_order_id = None
         lot.sell_submitted_at = None
         lot.notes.append(f"Sell order became {status}; lot returned to open")
     else:
-        return {"lot_id": lot.lot_id, "side": "sell", "order_status": status}
-    return {"lot_id": lot.lot_id, "side": "sell", "order_status": status, "lot_status": lot.status}
+        return {
+            "lot_id": lot.lot_id,
+            "level_index": lot.level_index,
+            "side": "sell",
+            "order_status": status,
+            "filled_qty": format_decimal(filled_qty),
+        }
+    return {
+        "lot_id": lot.lot_id,
+        "level_index": lot.level_index,
+        "side": "sell",
+        "order_status": status,
+        "lot_status": lot.status,
+        "filled_qty": format_decimal(filled_qty),
+        "fill_price": format_decimal(fill_price),
+        "realized_pnl": format_decimal(lot.realized_pnl or Decimal("0")),
+    }
 
 
 def _submit_grid_intents(
@@ -285,6 +411,7 @@ def _submit_grid_intents(
                 qty=intent.qty,
                 limit_price=intent.price,
                 client_order_id=client_order_id,
+                time_in_force="day",
             )
             order = alpaca.submit_order(payload)
             now = datetime.now(UTC).isoformat()
@@ -311,6 +438,7 @@ def _submit_grid_intents(
                 qty=intent.qty,
                 limit_price=intent.price,
                 client_order_id=client_order_id,
+                time_in_force="gtc",
             )
             order = alpaca.submit_order(payload)
             lot.status = "sell_submitted"
@@ -329,13 +457,14 @@ def _equity_limit_order_payload(
     qty: Decimal,
     limit_price: Decimal,
     client_order_id: str,
+    time_in_force: str,
 ) -> dict[str, Any]:
     return {
         "symbol": symbol,
         "qty": format_decimal(qty),
         "side": side,
         "type": "limit",
-        "time_in_force": "day",
+        "time_in_force": time_in_force,
         "limit_price": format(limit_price.quantize(Decimal("0.01")), "f"),
         "client_order_id": client_order_id,
     }
@@ -381,9 +510,12 @@ def _execution_allowed(
     config: AppConfig,
     kill_switch_active: bool,
     market_open: bool,
+    safety_errors: list[str],
 ) -> tuple[bool, str]:
     if not args.submit_paper:
         return False, "preview_only"
+    if safety_errors:
+        return False, "broker and local grid state do not match"
     if config.mode != "paper":
         return False, "config mode is not paper"
     if not bool(config.get("execution", "enable_paper_orders", default=False)):
@@ -449,35 +581,3 @@ def _log_grid_cycle_summary(logger: logging.Logger, artifact: dict[str, Any]) ->
         state["active_lot_count"],
         len(plan["blocked"]),
     )
-
-
-def _send_grid_cycle_discord(
-    notifier: DiscordNotifier,
-    artifact: dict[str, Any],
-    logger: logging.Logger,
-) -> bool:
-    if not notifier.is_configured:
-        logger.warning("Discord webhook is not configured")
-        return False
-    plan = artifact["plan"]
-    state = artifact["state"]
-    buy_count = sum(1 for item in plan["intents"] if item["action"] == "buy")
-    sell_count = sum(1 for item in plan["intents"] if item["action"] == "sell")
-    submitted = artifact["submitted_orders"]
-    lines = [
-        "**Grid Cycle**",
-        "",
-        f"**{artifact['symbol']}** close: ${artifact['bar']['close']}",
-        f"Anchor: ${state['anchor_price']}",
-        f"Open lots: {state['open_inventory_lot_count']}",
-        f"Signals: {buy_count} buy, {sell_count} sell",
-        f"Orders sent: {len(submitted)}",
-    ]
-    if plan["blocked"]:
-        lines.append(f"Blocked levels: {len(plan['blocked'])}")
-    if artifact["submit_requested"] and not artifact["execution_allowed"]:
-        lines.append(f"Submit skipped: {artifact['execution_reason']}")
-    result = notifier.send("\n".join(lines))
-    if not result.ok:
-        logger.error("Discord grid cycle failed: %s", result.error)
-    return result.ok
