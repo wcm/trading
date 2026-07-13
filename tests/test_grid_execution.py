@@ -174,6 +174,39 @@ def test_grid_discord_messages_are_event_only() -> None:
     assert "Sell target" in messages[0]
 
 
+def test_grid_discord_can_include_cycle_status() -> None:
+    artifact = {
+        "symbol": "TQQQ",
+        "market_open": True,
+        "bar": {"open": "75.00", "close": "74.25"},
+        "state": {
+            "anchor_price": "76.00",
+            "open_inventory_lot_count": 1,
+            "unrealized_pnl": "-12.50",
+        },
+        "broker_snapshot": {
+            "position_qty": "5",
+            "open_orders": [{"id": "sell-1"}],
+        },
+        "next_buy_level": {"level_index": 2, "price": "71.51"},
+        "safety_errors": [],
+        "reconciliation_events": [],
+        "submitted_orders": [],
+    }
+
+    messages = grid_event_messages(artifact, include_status=True)
+
+    assert len(messages) == 1
+    assert messages[0].startswith("# Grid Status")
+    assert "**TQQQ price:** $74.25" in messages[0]
+    assert "**Latest 5-minute change:** -$0.75 (-1.00%)" in messages[0]
+    assert "**Next buy:** Level 2 at $71.51" in messages[0]
+    assert "**Shares held:** 5" in messages[0]
+    assert "**Working orders:** 1" in messages[0]
+    assert "**Unrealized P&L:** -$12.50" in messages[0]
+    assert "**Status:** Holding shares and waiting to sell" in messages[0]
+
+
 def _open_lot(*, status: str, sell_order_id: str | None = None) -> GridLotState:
     return GridLotState(
         lot_id="lot-1",

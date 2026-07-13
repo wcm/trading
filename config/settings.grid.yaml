@@ -55,6 +55,12 @@ execution:
   order_type: limit
   no_market_orders: true
 
+notifications:
+  provider: discord
+  webhook_env_var: DISCORD_WEBHOOK_URL
+  # Testing mode: send a simple status report on every one-minute scheduler cycle.
+  grid_status_every_cycle: true
+
 runtime:
   kill_switch_path: data/grid/KILL_SWITCH
   log_dir: logs/grid

@@ -341,7 +341,12 @@ Implemented event message titles:
 - `Grid Safety Block`
 - `Grid Bot Error`
 
-Quiet cycles do not send Discord messages.
+During the initial paper test, every one-minute scheduler cycle also sends a
+`Grid Status` message. It shows the current TQQQ price, latest 5-minute price
+change, distance from the grid anchor, next buy level, shares held, working
+orders, unrealized P&L, and a short plain-English status. Set
+`notifications.grid_status_every_cycle` to `false` in
+`config/settings.grid.yaml` to return to event-only messages.
 
 The most important daily summary fields:
 

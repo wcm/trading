@@ -13,7 +13,7 @@ from trading_bot.backtesting.bars import PriceBar
 from trading_bot.brokers.alpaca import AlpacaClient, AlpacaCredentialsError
 from trading_bot.config import AppConfig, resolve_path
 from trading_bot.execution.orders import build_client_order_id
-from trading_bot.grid.state import GridLotState, load_grid_state, save_grid_state
+from trading_bot.grid.state import GridLotState, GridState, load_grid_state, save_grid_state
 from trading_bot.grid.reconciliation import (
     grid_reconciliation_errors,
     load_grid_broker_snapshot,
@@ -24,6 +24,7 @@ from trading_bot.grid.strategy import (
     GridPlan,
     GridStrategyConfig,
     build_grid_plan,
+    buy_price_for_level,
     grid_config_from_app_config,
     lot_from_buy_intent,
 )
@@ -154,13 +155,21 @@ def run_grid_cycle_command(args: argparse.Namespace) -> int:
         "plan": plan.to_dict(),
         "submitted_orders": submitted_orders,
         "state": state.summary(mark_price=bar.close),
+        "next_buy_level": _next_grid_buy_level(state, strategy_config),
     }
 
     _log_grid_cycle_summary(logger, artifact)
     if args.json_output:
         write_json_artifact(args.json_output, artifact, logger, "grid cycle")
     if args.send_discord:
-        send_grid_event_notifications(notifier, artifact, logger)
+        send_grid_event_notifications(
+            notifier,
+            artifact,
+            logger,
+            include_status=bool(
+                config.get("notifications", "grid_status_every_cycle", default=False)
+            ),
+        )
     return 0
 
 
@@ -554,6 +563,25 @@ def _grid_scheduler_cycle_args(args: argparse.Namespace) -> argparse.Namespace:
         output_dir = resolve_path(args.json_output_dir)
         cycle_args.json_output = str(output_dir / f"grid_cycle_{timestamp}.json")
     return cycle_args
+
+
+def _next_grid_buy_level(
+    state: GridState, strategy_config: GridStrategyConfig
+) -> dict[str, Any] | None:
+    if state.anchor_price is None:
+        return None
+    active_levels = state.active_level_indexes()
+    spacing = strategy_config.grid_spacing_pct / Decimal("100")
+    for level_index in range(1, strategy_config.max_buy_levels_below_anchor + 1):
+        if level_index in active_levels:
+            continue
+        return {
+            "level_index": level_index,
+            "price": format_decimal(
+                buy_price_for_level(state.anchor_price, spacing, level_index)
+            ),
+        }
+    return None
 
 
 def _seconds_until_next_open(clock: dict[str, Any], *, fallback_minutes: float) -> float:
