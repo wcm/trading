@@ -39,7 +39,7 @@ def test_grid_backtest_blocks_buys_when_inventory_limit_is_reached() -> None:
     assert result.metrics["open_lot_count"] == 1
 
 
-def test_grid_backtest_can_pause_after_consecutive_down_levels() -> None:
+def test_grid_backtest_can_cap_active_buy_levels() -> None:
     bars = [
         _bar("2026-01-02T14:30:00+00:00", open_="100", high="100", low="70", close="70"),
     ]
@@ -56,6 +56,28 @@ def test_grid_backtest_can_pause_after_consecutive_down_levels() -> None:
     assert result.metrics["buy_count"] == 2
     assert result.risk_block_counts["consecutive_down_levels"] >= 1
     assert result.metrics["paused_days"] == 1
+
+
+def test_grid_backtest_active_level_cap_still_applies_after_a_sell() -> None:
+    bars = [
+        _bar("2026-01-02T14:30:00+00:00", open_="100", high="100", low="90", close="90"),
+        _bar("2026-01-05T14:30:00+00:00", open_="90", high="95", low="90", close="92"),
+        _bar("2026-01-06T14:30:00+00:00", open_="92", high="94", low="80", close="80"),
+    ]
+
+    result = run_grid_backtest(
+        bars,
+        _config(
+            max_inventory_value=Decimal("10000"),
+            max_unrealized_loss=None,
+            pause_new_buys_after_consecutive_down_levels=2,
+        ),
+    )
+
+    assert result.metrics["buy_count"] == 3
+    assert result.metrics["sell_count"] == 1
+    assert result.metrics["open_lot_count"] == 2
+    assert result.risk_block_counts["consecutive_down_levels"] >= 1
 
 
 def test_grid_backtest_waits_until_next_bar_after_any_sell_fill() -> None:

@@ -28,9 +28,9 @@ grid_risk:
   strategy_capital: 10000
   max_inventory_value: 8000
   cash_reserve: 2000
-  # The runtime currently enforces the three limits above plus the two below.
+  # Keep the loss gate, but let dollar limits decide how many levels may open.
   max_unrealized_loss: 1200
-  pause_new_buys_after_consecutive_down_levels: 5
+  pause_new_buys_after_consecutive_down_levels: null
 
   # Planned safeguards. These are intentionally not enforced in the first paper test.
   max_open_buy_orders: 16

@@ -74,7 +74,8 @@ def load_historical_bars(
         feed=feed,
     )
     if use_cache and cache_path.exists():
-        return _read_cached_bars(cache_path)
+        bars = _read_cached_bars(cache_path)
+        return _regular_session_bars_for_alpaca(bars, source=source, timeframe=timeframe)
 
     if source == "alpaca":
         if alpaca is None:
@@ -123,7 +124,8 @@ def _load_alpaca_bars(
         limit=10_000,
         sort="asc",
     )
-    return _bars_from_alpaca_rows(data.get(symbol.upper(), []))
+    bars = _bars_from_alpaca_rows(data.get(symbol.upper(), []))
+    return _regular_session_bars_for_alpaca(bars, source="alpaca", timeframe=timeframe)
 
 
 def _bars_from_alpaca_rows(rows: list[dict[str, Any]]) -> list[PriceBar]:
@@ -147,6 +149,31 @@ def _bars_from_alpaca_rows(rows: list[dict[str, Any]]) -> list[PriceBar]:
             )
         )
     return bars
+
+
+def _is_intraday_timeframe(timeframe: str) -> bool:
+    normalized = timeframe.strip().lower()
+    return "min" in normalized or "hour" in normalized
+
+
+def _regular_session_bars_for_alpaca(
+    bars: list[PriceBar],
+    *,
+    source: str,
+    timeframe: str,
+) -> list[PriceBar]:
+    if source != "alpaca" or not _is_intraday_timeframe(timeframe):
+        return bars
+    return [bar for bar in bars if _is_regular_session_bar(bar)]
+
+
+def _is_regular_session_bar(bar: PriceBar) -> bool:
+    timestamp = datetime.fromisoformat(bar.timestamp.replace("Z", "+00:00"))
+    eastern_time = timestamp.astimezone(EASTERN)
+    return (
+        eastern_time.weekday() < 5
+        and time(9, 30) <= eastern_time.time().replace(tzinfo=None) < time(16, 0)
+    )
 
 
 def _load_yahoo_bars(*, symbol: str, timeframe: str, start: date, end: date) -> list[PriceBar]:

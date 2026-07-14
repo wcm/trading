@@ -159,7 +159,6 @@ def run_grid_backtest(bars: list[PriceBar], config: GridBacktestConfig) -> GridB
     risk_block_counts: dict[str, int] = {}
     paused_days: set[str] = set()
     trade_days: set[str] = set()
-    down_level_streak = 0
     next_trade_id = 1
 
     peak_equity = config.starting_cash
@@ -174,7 +173,6 @@ def run_grid_backtest(bars: list[PriceBar], config: GridBacktestConfig) -> GridB
     for bar in bars:
         if anchor is None:
             anchor = bar.open
-            down_level_streak = 0
 
         lots_to_keep: list[GridLot] = []
         sold_count = 0
@@ -204,8 +202,6 @@ def run_grid_backtest(bars: list[PriceBar], config: GridBacktestConfig) -> GridB
             else:
                 lots_to_keep.append(lot)
         open_lots = lots_to_keep
-        if sold_count:
-            down_level_streak = 0
 
         if sold_count > 0:
             if not open_lots:
@@ -234,7 +230,6 @@ def run_grid_backtest(bars: list[PriceBar], config: GridBacktestConfig) -> GridB
         if not open_lots and _should_recenter_up(anchor, bar.close, config.recenter_up_pct):
             anchor = bar.close
             recenter_count += 1
-            down_level_streak = 0
             (
                 peak_equity,
                 max_drawdown,
@@ -281,7 +276,6 @@ def run_grid_backtest(bars: list[PriceBar], config: GridBacktestConfig) -> GridB
                 cost=cost,
                 open_lots=open_lots,
                 mark_price=bar.close,
-                down_level_streak=down_level_streak,
             )
             if block_reason:
                 _count_block(risk_block_counts, block_reason)
@@ -314,7 +308,6 @@ def run_grid_backtest(bars: list[PriceBar], config: GridBacktestConfig) -> GridB
                 )
             )
             next_trade_id += 1
-            down_level_streak += 1
             trade_days.add(bar.day.isoformat())
 
         (
@@ -421,7 +414,6 @@ def _buy_block_reason(
     cost: Decimal,
     open_lots: list[GridLot],
     mark_price: Decimal,
-    down_level_streak: int,
 ) -> str | None:
     if cash - cost < config.cash_reserve:
         return "cash_reserve"
@@ -434,7 +426,7 @@ def _buy_block_reason(
             return "max_unrealized_loss"
     if (
         config.pause_new_buys_after_consecutive_down_levels is not None
-        and down_level_streak >= config.pause_new_buys_after_consecutive_down_levels
+        and len(open_lots) >= config.pause_new_buys_after_consecutive_down_levels
     ):
         return "consecutive_down_levels"
     return None

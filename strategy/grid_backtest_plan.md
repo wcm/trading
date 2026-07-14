@@ -229,8 +229,11 @@ grid_risk:
   max_unrealized_loss: 1200
   max_intraday_tqqq_drop_pct: 8.0
   max_intraday_qqq_drop_pct: 3.0
-  pause_new_buys_after_consecutive_down_levels: 5
+  pause_new_buys_after_consecutive_down_levels: null
 ```
+
+The active-level cap was disabled after the initial comparison runs. The
+inventory, cash-reserve, and unrealized-loss gates remain active.
 
 For the first daily backtest, intraday loss gates can be approximated using the
 daily low versus the daily open.

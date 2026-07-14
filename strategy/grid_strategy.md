@@ -88,10 +88,10 @@ This keeps the experiments independent:
 - daily summaries are easier to understand
 - debugging is cleaner
 
-## 4. Initial Risk Gates
+## 4. Current Risk Gates
 
-These are proposed starting values for paper testing. They are intentionally
-simple and can be adjusted after we see behavior.
+These are the active paper-testing values. The fixed five-level buy brake was
+disabled after comparing three-month and six-month backtests.
 
 ```yaml
 grid_risk:
@@ -99,7 +99,7 @@ grid_risk:
   max_inventory_value: 8000
   cash_reserve: 2000
   max_unrealized_loss: 1200
-  pause_new_buys_after_consecutive_down_levels: 5
+  pause_new_buys_after_consecutive_down_levels: null
 ```
 
 Plain English:
@@ -108,6 +108,8 @@ Plain English:
 - It should not hold more than about `$8,000` of TQQQ inventory.
 - It keeps about `$2,000` in reserve.
 - Each buy order starts around `$400` and grows on deeper levels, capped at `$800`.
+- There is no fixed limit on the number of active grid levels.
+- New buys continue only while the inventory, reserve, and unrealized-loss gates allow them.
 - If losses are too large, it stops opening new buys.
 - The daily/weekly loss and TQQQ/QQQ crash gates remain planned work. They are
   not enforced during the first supervised paper test.
