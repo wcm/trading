@@ -183,8 +183,8 @@ The backtester should also support adaptive sizing:
 adaptive_sizing:
   enabled: true
   scale_factor: 8.0
-  max_order_multiplier: 2.0
-  max_single_order_notional: 800
+  max_order_multiplier: 2.25
+  max_single_order_notional: 1100
 ```
 
 Formula:
@@ -214,19 +214,19 @@ the first comparison.
 The backtest should use grid-specific risk gates, separate from the put credit
 strategy.
 
-Initial test values:
+Current Profile 3 paper-test values:
 
 ```yaml
 grid_risk:
   strategy_capital: 10000
-  max_inventory_value: 8000
-  cash_reserve: 2000
-  max_single_order_notional: 500
+  max_inventory_value: 9000
+  cash_reserve: 1000
+  max_single_order_notional: 1100
   max_open_buy_orders: 16
   max_open_sell_orders: 16
   max_daily_realized_loss: 500
   max_weekly_realized_loss: 1000
-  max_unrealized_loss: 1200
+  max_unrealized_loss: 1800
   max_intraday_tqqq_drop_pct: 8.0
   max_intraday_qqq_drop_pct: 3.0
   pause_new_buys_after_consecutive_down_levels: null

@@ -16,7 +16,7 @@ grid_strategy:
   symbol: TQQQ
   reference_symbol: QQQ
   grid_spacing_pct: 3.0
-  base_order_notional: 400
+  base_order_notional: 500
   max_buy_levels_below_anchor: 16
   take_profit_levels: 1
   anchor_mode: latest_bar_close
@@ -26,10 +26,10 @@ grid_strategy:
 
 grid_risk:
   strategy_capital: 10000
-  max_inventory_value: 8000
-  cash_reserve: 2000
+  max_inventory_value: 9000
+  cash_reserve: 1000
   # Keep the loss gate, but let dollar limits decide how many levels may open.
-  max_unrealized_loss: 1200
+  max_unrealized_loss: 1800
   pause_new_buys_after_consecutive_down_levels: null
 
   # Planned safeguards. These are intentionally not enforced in the first paper test.
@@ -43,8 +43,8 @@ grid_risk:
 adaptive_sizing:
   enabled: true
   scale_factor: 8.0
-  max_order_multiplier: 2.0
-  max_single_order_notional: 800
+  max_order_multiplier: 2.25
+  max_single_order_notional: 1100
 
 storage:
   sqlite_path: data/grid/trading_bot.sqlite3

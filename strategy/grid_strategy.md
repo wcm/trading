@@ -90,24 +90,25 @@ This keeps the experiments independent:
 
 ## 4. Current Risk Gates
 
-These are the active paper-testing values. The fixed five-level buy brake was
-disabled after comparing three-month and six-month backtests.
+These are the active Profile 3 paper-testing values. Profile 3 was selected
+after a seven-profile, six-month comparison; it returned `20.03%` with a
+`-13.85%` maximum simulated drawdown in that specific test window.
 
 ```yaml
 grid_risk:
   strategy_capital: 10000
-  max_inventory_value: 8000
-  cash_reserve: 2000
-  max_unrealized_loss: 1200
+  max_inventory_value: 9000
+  cash_reserve: 1000
+  max_unrealized_loss: 1800
   pause_new_buys_after_consecutive_down_levels: null
 ```
 
 Plain English:
 
 - The grid can use up to about `$10,000` of paper capital.
-- It should not hold more than about `$8,000` of TQQQ inventory.
-- It keeps about `$2,000` in reserve.
-- Each buy order starts around `$400` and grows on deeper levels, capped at `$800`.
+- It should not hold more than about `$9,000` of TQQQ inventory.
+- It keeps about `$1,000` in reserve.
+- Each buy order starts around `$500` and grows on deeper levels, capped at `$1,100`.
 - There is no fixed limit on the number of active grid levels.
 - New buys continue only while the inventory, reserve, and unrealized-loss gates allow them.
 - If losses are too large, it stops opening new buys.
@@ -128,16 +129,16 @@ Even when new buys are paused, the bot should still:
 - calculate P&L
 - obey emergency rules
 
-## 5. Initial Grid Settings
+## 5. Current Grid Settings
 
-Recommended v1 settings:
+Active Profile 3 paper settings:
 
 ```yaml
 grid_strategy:
   name: grid_tqqq
   symbol: TQQQ
   grid_spacing_pct: 3.0
-  base_order_notional: 400
+  base_order_notional: 500
   max_buy_levels_below_anchor: 16
   take_profit_levels: 1
   anchor_mode: latest_bar_close
@@ -148,17 +149,17 @@ grid_strategy:
 adaptive_sizing:
   enabled: true
   scale_factor: 8.0
-  max_order_multiplier: 2.0
-  max_single_order_notional: 800
+  max_order_multiplier: 2.25
+  max_single_order_notional: 1100
 ```
 
 Plain English:
 
 - Start with one symbol: `TQQQ`.
 - Place grid levels roughly every `3.0%`.
-- Start around `$400` per buy level.
+- Start around `$500` per buy level.
 - Buy a little more when TQQQ has dropped farther from the grid anchor.
-- Never let one adaptive buy become more than `2x` the base amount.
+- Never let one adaptive buy exceed `$1,100` or `2.25x` the base amount.
 - Sell each bought lot one grid level higher.
 - Only move the grid upward when we have no TQQQ position.
 - If TQQQ rises about `5.0%` while we are flat, move the grid anchor up instead
@@ -256,15 +257,15 @@ Adaptive sizing formula:
 buy amount = base amount * (1 + scale factor * drop from anchor)
 ```
 
-Example with `$400` base and scale factor `8.0`:
+Example with `$500` base and scale factor `8.0`:
 
 ```text
-3% drop:  400 * (1 + 8 * 0.03) = about $496
-6% drop:  400 * (1 + 8 * 0.06) = about $592
-10% drop: 400 * (1 + 8 * 0.10) = about $720
+3% drop:  500 * (1 + 8 * 0.03) = about $620
+6% drop:  500 * (1 + 8 * 0.06) = about $740
+10% drop: 500 * (1 + 8 * 0.10) = about $900
 ```
 
-The `2x` cap means a single buy cannot exceed about `$800`.
+The multiplier and dollar caps mean a single buy cannot exceed `$1,100`.
 
 ## 7. Close / Sell Logic
 
@@ -483,7 +484,7 @@ Use separate config/account/state.
 Start TQQQ only.
 Allow overnight inventory in paper.
 Use $10,000 strategy capital.
-Use $400 base grid buys with adaptive sizing.
+Use $500 base grid buys with adaptive sizing.
 Use 3.0% grid spacing based on the first 1-month, 3-month, and 6-month
 intraday backtest comparisons.
 Add LLM as a phase 2/3 risk pause layer, not as the first order engine.
