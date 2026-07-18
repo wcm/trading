@@ -31,6 +31,20 @@ def test_grid_cycle_creates_buy_intent_when_level_is_reached() -> None:
     assert intent.qty == Decimal("5")
 
 
+def test_grid_cycle_uses_fractional_shares_to_match_the_target_notional() -> None:
+    state = GridState(strategy_name="grid_tqqq", symbol="TQQQ", anchor_price=Decimal("100"))
+
+    plan = build_grid_plan(
+        state,
+        _config(allow_fractional_shares=True),
+        _bar(open_="100", high="100", low="97", close="97.50"),
+    )
+
+    intent = plan.intents[0]
+    assert intent.qty == Decimal("5.113402")
+    assert intent.notional == Decimal("495.999994")
+
+
 def test_grid_cycle_adaptive_size_increases_deeper_buys() -> None:
     state = GridState(strategy_name="grid_tqqq", symbol="TQQQ", anchor_price=Decimal("100"))
 
@@ -88,7 +102,7 @@ def test_grid_cycle_places_paired_sell_immediately_and_skips_same_cycle_buys() -
     assert "new buys are skipped" in plan.events[-1]
 
 
-def _config() -> GridStrategyConfig:
+def _config(*, allow_fractional_shares: bool = False) -> GridStrategyConfig:
     return GridStrategyConfig(
         name="grid_tqqq",
         symbol="TQQQ",
@@ -105,6 +119,7 @@ def _config() -> GridStrategyConfig:
         adaptive_scale_factor=Decimal("8"),
         adaptive_max_order_multiplier=Decimal("2"),
         max_single_order_notional=Decimal("800"),
+        allow_fractional_shares=allow_fractional_shares,
     )
 
 

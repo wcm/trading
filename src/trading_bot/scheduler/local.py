@@ -5,9 +5,11 @@ import logging
 import time
 from datetime import UTC, date, datetime, time as dt_time
 from pathlib import Path
+from typing import Any
 
 from trading_bot.app import bootstrap
 from trading_bot.brokers.alpaca import AlpacaClient, AlpacaCredentialsError
+from trading_bot.config import resolve_path
 from trading_bot.cycles.open_discovery import (
     _close_recommended_spreads,
     _log_position_monitor_result,
@@ -28,7 +30,6 @@ from trading_bot.storage.db import record_bot_run
 from trading_bot.summaries.daily import _build_daily_trading_summary, _daily_summary_bot_run_status
 from trading_bot.utils.artifacts import write_json_artifact
 from trading_bot.utils.market_time import EASTERN
-from trading_bot.config import resolve_path
 
 
 def run_local_scheduler(args: argparse.Namespace) -> int:

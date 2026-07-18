@@ -9,6 +9,8 @@ from trading_bot.commands.basic import (
     run_watchlist_decisions,
 )
 from trading_bot.commands.backtesting import run_grid_backtest_command, run_grid_sweep_command
+from trading_bot.commands.dca import run_dca_cycle_command, run_dca_scheduler_command
+from trading_bot.commands.dca_backtesting import run_dca_backtest_command
 from trading_bot.commands.grid import run_grid_cycle_command, run_grid_scheduler_command
 from trading_bot.orders.lifecycle import run_order_poll
 from trading_bot.scheduler.local import run_local_scheduler
@@ -41,10 +43,16 @@ def main(argv: list[str] | None = None) -> int:
         return run_grid_backtest_command(args)
     if args.command == "sweep-grid":
         return run_grid_sweep_command(args)
+    if args.command == "backtest-dca":
+        return run_dca_backtest_command(args)
     if args.command == "grid-cycle":
         return run_grid_cycle_command(args)
     if args.command == "grid-schedule-local":
         return run_grid_scheduler_command(args)
+    if args.command == "dca-cycle":
+        return run_dca_cycle_command(args)
+    if args.command == "dca-schedule-local":
+        return run_dca_scheduler_command(args)
     if args.command == "schedule-local":
         return run_local_scheduler(args)
 

@@ -1,0 +1,24 @@
+services:
+  dca-bot:
+    build: .
+    image: trading-bot:dca-paper
+    restart: unless-stopped
+    env_file:
+      - .env.dca
+    volumes:
+      - ./config/settings.dca.yaml:/app/config/settings.dca.yaml:ro
+      - ./data/dca:/app/data/dca
+      - ./logs/dca:/app/logs/dca
+    command:
+      - uv
+      - run
+      - --no-sync
+      - trading-bot
+      - --settings
+      - config/settings.dca.yaml
+      - dca-schedule-local
+      - --submit-paper
+      - --send-discord
+      - --json-output-dir
+      - data/dca/cycles
+    stop_grace_period: 30s

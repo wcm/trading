@@ -142,6 +142,36 @@ def test_grid_backtest_buys_from_recentered_anchor_on_later_bar() -> None:
     assert result.metrics["open_lot_count"] == 1
 
 
+def test_grid_backtest_can_require_multiple_closes_before_recentering() -> None:
+    bars = [
+        _bar("2026-01-02T14:30:00+00:00", open_="100", high="106", low="100", close="105"),
+        _bar("2026-01-05T14:30:00+00:00", open_="105", high="107", low="104", close="106"),
+    ]
+
+    result = run_grid_backtest(
+        bars,
+        _config(recenter_up_pct=Decimal("5"), recenter_confirmation_bars=2),
+    )
+
+    assert result.metrics["recenter_count"] == 1
+    assert result.metrics["buy_count"] == 0
+
+
+def test_grid_backtest_keeps_anchor_after_all_lots_are_sold() -> None:
+    bars = [
+        _bar("2026-01-02T14:30:00+00:00", open_="100", high="100", low="95", close="95"),
+        _bar("2026-01-05T14:30:00+00:00", open_="95", high="100", low="95", close="100"),
+        _bar("2026-01-06T14:30:00+00:00", open_="96", high="96", low="94", close="94"),
+    ]
+
+    result = run_grid_backtest(bars, _config())
+
+    assert result.metrics["buy_count"] == 2
+    assert result.metrics["sell_count"] == 1
+    assert result.trades[-1].side == "buy"
+    assert result.trades[-1].price == Decimal("95.00")
+
+
 def test_grid_backtest_adaptive_sizing_increases_deeper_buy_size() -> None:
     bars = [
         _bar("2026-01-02T14:30:00+00:00", open_="100", high="100", low="90", close="90"),
@@ -192,6 +222,7 @@ def _config(
     max_unrealized_loss: Decimal | None = Decimal("1200"),
     pause_new_buys_after_consecutive_down_levels: int | None = 5,
     recenter_up_pct: Decimal | None = None,
+    recenter_confirmation_bars: int = 1,
     adaptive_sizing_enabled: bool = False,
     adaptive_scale_factor: Decimal = Decimal("0"),
     adaptive_max_order_multiplier: Decimal = Decimal("1"),
@@ -208,6 +239,7 @@ def _config(
         max_unrealized_loss=max_unrealized_loss,
         pause_new_buys_after_consecutive_down_levels=pause_new_buys_after_consecutive_down_levels,
         recenter_up_pct=recenter_up_pct,
+        recenter_confirmation_bars=recenter_confirmation_bars,
         adaptive_sizing_enabled=adaptive_sizing_enabled,
         adaptive_scale_factor=adaptive_scale_factor,
         adaptive_max_order_multiplier=adaptive_max_order_multiplier,

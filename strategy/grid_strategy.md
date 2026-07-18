@@ -1,6 +1,6 @@
 # TQQQ Grid Strategy Proposal (v1)
 
-Last updated: 2026-06-17
+Last updated: 2026-07-18
 
 This is the initial proposal for a separate paper-trading grid strategy using
 `TQQQ`. It is an engineering note for experimentation, not financial advice.
@@ -91,8 +91,32 @@ This keeps the experiments independent:
 ## 4. Current Risk Gates
 
 These are the active Profile 3 paper-testing values. Profile 3 was selected
-after a seven-profile, six-month comparison; it returned `20.03%` with a
-`-13.85%` maximum simulated drawdown in that specific test window.
+after a seven-profile, six-month comparison. The corrected backtester keeps the
+grid anchor after a complete exit, matching the live strategy.
+
+- The `2026-01-17` through `2026-07-17` test returned `14.97%` with a
+  `-15.25%` maximum simulated drawdown.
+- The split-adjusted `2025-07-17` through `2026-07-17` test returned `26.83%`
+  with a `-16.13%` maximum simulated drawdown.
+
+Both tests used the active `5%` recenter rule. Historical backtests use
+split-adjusted Alpaca bars so a share split cannot be mistaken for a market
+loss or leave simulated share quantities and sell targets on incompatible
+price scales.
+
+Historical stress tests use split-adjusted daily bars where older intraday data
+is unavailable:
+
+| Period | Profile 2 with 8% recenter | Profile 3 with 5% recenter |
+| --- | ---: | ---: |
+| `2018-08-01` to `2019-12-31` | `+26.24%`, `-37.53%` drawdown | `+26.91%`, `-37.28%` drawdown |
+| `2020-01-01` to `2020-12-31` | `+14.62%`, `-52.03%` drawdown | `+22.65%`, `-53.02%` drawdown |
+| `2022-01-01` to `2022-12-31` | `-70.54%`, `-72.18%` drawdown | `-62.51%`, `-64.08%` drawdown |
+| `2021-11-01` to `2023-12-31` | `-19.04%`, `-58.25%` drawdown | `-19.54%`, `-61.18%` drawdown |
+
+These stress tests show that neither profile has adequate protection against a
+long TQQQ bear market. Keep the strategy in paper mode until a bear-market and
+inventory-protection rule has been implemented and tested.
 
 ```yaml
 grid_risk:
@@ -145,6 +169,7 @@ grid_strategy:
   recenter_only_when_flat: true
   recenter_up_pct: 5.0
   allow_overnight_inventory: true
+  allow_fractional_shares: true
 
 adaptive_sizing:
   enabled: true
@@ -161,6 +186,7 @@ Plain English:
 - Buy a little more when TQQQ has dropped farther from the grid anchor.
 - Never let one adaptive buy exceed `$1,100` or `2.25x` the base amount.
 - Sell each bought lot one grid level higher.
+- Use fractional shares so each buy stays close to its intended dollar amount.
 - Only move the grid upward when we have no TQQQ position.
 - If TQQQ rises about `5.0%` while we are flat, move the grid anchor up instead
   of buying immediately.
@@ -234,8 +260,8 @@ Every minute:
 4. If flat and no grid exists, create a new grid around the latest bar close.
 5. If flat and price rises enough above the anchor, move the anchor up.
 6. If price reaches a lower buy level, place a small `DAY` buy limit order.
-7. If a buy fills, place the paired `GTC` sell limit immediately, one grid
-   level higher.
+7. If a buy fills, place the paired sell limit immediately, one grid level
+   higher. Whole-share sells use `GTC`; fractional sells use `DAY`.
 8. If new buys are paused, do not place new buy orders, but continue managing
    sell orders and inventory.
 
@@ -291,9 +317,10 @@ When the paired sell fills:
 Order duration:
 
 - triggered buy orders use `DAY` and expire at that trading day's close if unfilled
-- paired profit-taking sells use `GTC` and remain open across trading days;
-  Alpaca currently expires GTC orders after 90 days, after which the bot can
-  recreate the paired sell on its next market cycle
+- whole-share profit-taking sells use `GTC` and remain open across trading days
+- fractional profit-taking sells use `DAY`, as required by Alpaca; if one
+  expires unfilled, the bot returns the lot to open state and recreates the
+  paired sell on the next market cycle
 
 ## 8. LLM Role
 
@@ -407,7 +434,8 @@ Current status:
 - sell fills record realized P&L inside the grid state file
 - `grid-schedule-local` can run the cycle every minute during market hours
 - the runtime fails closed if Alpaca TQQQ positions/orders disagree with local state
-- paired sells are submitted immediately as `GTC` orders after buy fills
+- paired sells are submitted immediately after buy fills; whole-share sells use
+  `GTC`, while fractional sells use `DAY` and are recreated after expiration
 
 ### Phase 3: Monitoring And Reporting
 
@@ -485,6 +513,7 @@ Start TQQQ only.
 Allow overnight inventory in paper.
 Use $10,000 strategy capital.
 Use $500 base grid buys with adaptive sizing.
+Use fractional shares to keep each purchase close to its intended dollar size.
 Use 3.0% grid spacing based on the first 1-month, 3-month, and 6-month
 intraday backtest comparisons.
 Add LLM as a phase 2/3 risk pause layer, not as the first order engine.

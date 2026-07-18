@@ -23,6 +23,7 @@ grid_strategy:
   recenter_only_when_flat: true
   recenter_up_pct: 5.0
   allow_overnight_inventory: true
+  allow_fractional_shares: true
 
 grid_risk:
   strategy_capital: 10000

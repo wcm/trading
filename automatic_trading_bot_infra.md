@@ -1,15 +1,17 @@
 # Automatic Trading Bot Infrastructure Plan
 
-Last updated: 2026-06-14
-Status: Cloud paper trading, shared-infrastructure design in progress
+Last updated: 2026-07-18
+Status: Three paper strategies share one codebase with isolated bot processes
 
 This document describes the shared infrastructure for the automatic trading bot.
 Strategy-specific rules live outside this file:
 
-- Current put credit spread strategy:
+- Put credit spread strategy:
   [strategy/put_credit_strategy.md](strategy/put_credit_strategy.md)
-- Proposed TQQQ grid strategy:
+- TQQQ grid strategy:
   [strategy/grid_strategy.md](strategy/grid_strategy.md)
+- Recurring investment strategy:
+  [strategy/dca_strategy.md](strategy/dca_strategy.md)
 
 Operational commands, cloud deployment steps, log viewing, and emergency
 procedures live in [automatic_trading_bot_runbook.md](automatic_trading_bot_runbook.md).
@@ -19,12 +21,12 @@ procedures live in [automatic_trading_bot_runbook.md](automatic_trading_bot_runb
 Build a trading bot platform that can run one or more strategy modules through
 the same safe infrastructure:
 
-- one broker/account adapter
-- one scheduler
+- shared broker adapters
+- reusable scheduler infrastructure
 - one data layer
 - one notification system
 - one persistence layer
-- one shared account risk engine
+- shared risk primitives with independent per-account limits
 - one execution/order lifecycle engine
 - strategy-specific scanners, decision packets, validators, and close logic
 
@@ -44,15 +46,18 @@ Currently implemented:
 - Alpaca is the only broker adapter.
 - Discord is the notification provider.
 - SQLite is the local/cloud persistence layer.
-- One strategy is implemented: `put_credit_strategy`.
+- `put_credit_strategy` is implemented and running in paper mode.
+- `grid_strategy` is implemented as a separate TQQQ paper bot/account.
+- `dca_strategy` has fixed monthly paper execution and fixed/adaptive
+  backtesting; its execution lock remains disabled until preview testing.
 - Paper open and close execution are deliberately enabled for the current paper
   experiment.
 
 Not implemented yet:
 
-- Multiple strategies running side by side.
+- A unified process that orchestrates multiple strategies in one account.
 - Per-strategy risk budgets.
-- Per-strategy scheduler cadence.
+- Shared allocation across strategies competing for the same account capital.
 - Per-strategy order allocation across competing signals.
 - Strategy registry/config format.
 - Generic strategy interface in code.
@@ -128,8 +133,9 @@ The target multi-strategy cycle should look like this:
 16. Poll/manage order lifecycle.
 17. Persist artifacts, SQLite rows, logs, and Discord summaries.
 
-Today this flow exists mostly for `put_credit_strategy`. The infrastructure plan
-is to generalize it without losing the hard safety gates already working.
+Today the three strategies reuse common infrastructure but run as isolated bot
+processes. This unified flow remains a future option for strategies that later
+share one account.
 
 ## 5. Shared Risk Model
 
@@ -341,6 +347,36 @@ Documentation:
 
 - [strategy/put_credit_strategy.md](strategy/put_credit_strategy.md)
 
+### `grid_strategy`
+
+Status: implemented as an independent TQQQ paper bot.
+
+Summary:
+
+- deterministic long-only TQQQ grid
+- separate Alpaca account, config, state, logs, Discord, and Compose service
+- adaptive order sizing and configurable upward recentering
+- historical backtests and parameter sweeps
+
+Documentation:
+
+- [strategy/grid_strategy.md](strategy/grid_strategy.md)
+
+### `dca_strategy`
+
+Status: implemented locally with paper execution locked by default.
+
+Summary:
+
+- fixed-dollar monthly or biweekly recurring purchases
+- exact-notional market orders with fractional shares
+- separate Alpaca account, config, state, logs, Discord, and Compose service
+- fixed and trailing-drawdown-scaled backtests
+
+Documentation:
+
+- [strategy/dca_strategy.md](strategy/dca_strategy.md)
+
 ### Future Strategies
 
 Possible future strategies:
@@ -351,15 +387,17 @@ Possible future strategies:
 - long call/put event trades
 - ETF-only lower-volatility spreads
 
-Any future strategy should be added behind the shared infrastructure interface,
-not as a separate bot.
+Future strategies should reuse the shared infrastructure. They may run as
+separate bot processes when separate accounts and risk isolation are desired.
 
 ## 13. Roadmap
 
 Current milestone:
 
 - Let the cloud paper bot run through market sessions.
-- Review the current strategy lifecycle end to end.
+- Preview the DCA cycle against its dedicated paper account before unlocking
+  paper orders.
+- Continue reviewing each strategy lifecycle end to end.
 - Keep live trading out of scope.
 
 Near-term infrastructure work:
@@ -406,8 +444,9 @@ disabled until that lifecycle is reviewed.
 
 ## 15. Known Gaps
 
-- Multi-strategy orchestration is planned but not implemented.
-- Current config is still mostly single-strategy.
+- Unified same-account multi-strategy orchestration is planned but not
+  implemented; current strategies run as isolated processes.
+- Configuration is strategy-specific rather than registry-driven.
 - Current SQLite schema is only partly strategy-aware.
 - Per-strategy risk budgets are not implemented.
 - Cross-strategy allocation is not implemented.

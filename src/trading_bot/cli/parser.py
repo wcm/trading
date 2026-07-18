@@ -254,6 +254,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional path to write full sweep JSON artifact.",
     )
 
+    backtest_dca = subparsers.add_parser(
+        "backtest-dca",
+        help="Backtest fixed or drawdown-scaled recurring investments.",
+    )
+    _add_dca_backtest_args(backtest_dca)
+
     grid_cycle = subparsers.add_parser(
         "grid-cycle",
         help="Run one TQQQ grid bot cycle with optional paper order submission.",
@@ -278,6 +284,32 @@ def build_parser() -> argparse.ArgumentParser:
         "--once",
         action="store_true",
         help="Run one scheduler check and exit. Useful for validation.",
+    )
+
+    dca_cycle = subparsers.add_parser(
+        "dca-cycle",
+        help="Run one recurring-investment cycle with optional paper submission.",
+    )
+    _add_dca_cycle_args(dca_cycle)
+
+    dca_scheduler = subparsers.add_parser(
+        "dca-schedule-local",
+        help="Run the recurring-investment bot during market hours.",
+    )
+    _add_dca_cycle_args(dca_scheduler)
+    dca_scheduler.add_argument(
+        "--interval-minutes",
+        type=float,
+        help="Minutes between due-date checks. Defaults to runtime.dca_scheduler_interval_minutes.",
+    )
+    dca_scheduler.add_argument(
+        "--json-output-dir",
+        help="Optional directory for timestamped DCA cycle artifacts.",
+    )
+    dca_scheduler.add_argument(
+        "--once",
+        action="store_true",
+        help="Run one scheduler check and exit.",
     )
 
     scheduler = subparsers.add_parser(
@@ -407,6 +439,12 @@ def _add_grid_backtest_common_args(parser: argparse.ArgumentParser) -> None:
         help="Alpaca stock data feed override when --data-source=alpaca.",
     )
     parser.add_argument(
+        "--adjustment",
+        choices=["raw", "split", "dividend", "all"],
+        default="split",
+        help="Historical Alpaca bar adjustment. Split-adjusted bars are the backtest default.",
+    )
+    parser.add_argument(
         "--cache-dir",
         default="data/backtests/cache",
         help="Directory for cached historical bars.",
@@ -454,6 +492,11 @@ def _add_grid_backtest_common_args(parser: argparse.ArgumentParser) -> None:
         help="When flat, move the grid anchor up after this percentage rise. Use 'off' to disable.",
     )
     parser.add_argument(
+        "--recenter-confirmation-bars",
+        type=int,
+        help="Consecutive qualifying closing bars required before moving the anchor upward.",
+    )
+    parser.add_argument(
         "--adaptive-sizing",
         action="store_true",
         help="Increase buy size as the buy level is farther below the anchor.",
@@ -472,8 +515,90 @@ def _add_grid_backtest_common_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--allow-fractional-shares",
+        dest="allow_fractional_shares",
         action="store_true",
-        help="Allow fractional simulated share quantities.",
+        default=None,
+        help="Allow fractional simulated shares, overriding the strategy settings.",
+    )
+    parser.add_argument(
+        "--whole-shares",
+        dest="allow_fractional_shares",
+        action="store_false",
+        help="Use whole simulated shares, overriding the strategy settings.",
+    )
+
+
+def _add_dca_backtest_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--symbol", help="Asset to buy. Defaults to dca_strategy.symbol.")
+    parser.add_argument("--timeframe", default="1Day", help="Historical bar timeframe.")
+    parser.add_argument("--start", default="2015-01-01", help="Start date in YYYY-MM-DD format.")
+    parser.add_argument("--end", default="2026-07-17", help="End date in YYYY-MM-DD format.")
+    parser.add_argument(
+        "--data-source",
+        choices=["yahoo", "alpaca"],
+        default="yahoo",
+        help="Historical data source.",
+    )
+    parser.add_argument("--feed", help="Alpaca stock feed when using Alpaca data.")
+    parser.add_argument(
+        "--adjustment",
+        choices=["raw", "split", "dividend", "all"],
+        default="split",
+        help="Historical Alpaca bar adjustment.",
+    )
+    parser.add_argument("--cache-dir", default="data/backtests/cache")
+    parser.add_argument("--no-cache", action="store_true")
+    parser.add_argument("--frequency", choices=["monthly", "biweekly"])
+    parser.add_argument("--contribution-amount", help="Base dollars invested each period.")
+    parser.add_argument("--day-of-month", type=int, help="Monthly scheduled calendar day.")
+    parser.add_argument("--biweekly-anchor-date", help="First biweekly due date in YYYY-MM-DD format.")
+    parser.add_argument("--sizing-mode", choices=["fixed", "drawdown_scaled"])
+    parser.add_argument(
+        "--drawdown-scale-factor",
+        help="Extra contribution multiplier per 100%% drawdown; 2 adds 20%% at a 10%% drawdown.",
+    )
+    parser.add_argument(
+        "--drawdown-lookback-days",
+        type=int,
+        help="Trailing calendar days used to find the drawdown peak.",
+    )
+    parser.add_argument(
+        "--max-contribution-multiplier",
+        help="Maximum adaptive multiplier, or 'off' for no limit.",
+    )
+    parser.add_argument(
+        "--max-contribution-per-purchase",
+        help="Maximum dollars per purchase, or 'off' for no limit.",
+    )
+    parser.add_argument(
+        "--max-annual-contribution",
+        help="Maximum annual contribution, or 'off' for no limit.",
+    )
+    parser.add_argument(
+        "--whole-shares",
+        action="store_true",
+        help="Use whole simulated shares instead of exact fractional investments.",
+    )
+    parser.add_argument("--json-output")
+    parser.add_argument("--purchases-csv")
+
+
+def _add_dca_cycle_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--state-path",
+        help="Persistent DCA state path. Defaults to storage.dca_state_path.",
+    )
+    parser.add_argument(
+        "--submit-paper",
+        action="store_true",
+        help="Request a paper purchase. Requires execution.enable_paper_orders=true.",
+    )
+    parser.add_argument("--send-discord", action="store_true")
+    parser.add_argument("--json-output")
+    parser.add_argument(
+        "--ignore-market-hours",
+        action="store_true",
+        help="Treat the market as open. For mock/local validation only.",
     )
 
 

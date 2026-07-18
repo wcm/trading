@@ -1,0 +1,51 @@
+mode: paper
+broker: alpaca
+
+alpaca:
+  trading_base_url: https://api.alpaca.markets
+  paper_base_url: https://paper-api.alpaca.markets
+  data_base_url: https://data.alpaca.markets
+  active_trading_base_url: https://paper-api.alpaca.markets
+  stock_data_feed: iex
+  request_timeout_seconds: 30
+  request_retries: 2
+  request_retry_backoff_seconds: 1
+
+dca_strategy:
+  name: dca_tqqq
+  symbol: TQQQ
+  frequency: biweekly
+  base_contribution: 250
+  # Buy on the first open market day on or after this calendar day.
+  day_of_month: 1
+  # Buy every 14 calendar days from this first scheduled date.
+  biweekly_anchor_date: 2026-07-20
+  allow_fractional_shares: true
+
+dca_sizing:
+  mode: drawdown_scaled
+  drawdown_lookback_days: 365
+  drawdown_scale_factor: 4.0
+  max_contribution_multiplier: 5.0
+
+dca_risk:
+  max_contribution_per_purchase: 1250
+  max_annual_contribution: null
+
+storage:
+  sqlite_path: data/dca/dca_tqqq.sqlite3
+  dca_state_path: data/dca/tqqq_dca_state.json
+
+execution:
+  # Keep locked until preview and backtest results have been reviewed.
+  enable_paper_orders: false
+  order_type: market
+
+notifications:
+  provider: discord
+  webhook_env_var: DISCORD_WEBHOOK_URL
+
+runtime:
+  kill_switch_path: data/dca/KILL_SWITCH
+  log_dir: logs/dca
+  dca_scheduler_interval_minutes: 60

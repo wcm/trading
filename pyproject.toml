@@ -1,7 +1,7 @@
 [project]
 name = "trading-bot"
 version = "0.1.0"
-description = "Local-first paper options trading bot"
+description = "Local-first multi-strategy paper trading bot"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -19,4 +19,3 @@ build-backend = "hatchling.build"
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
-

@@ -111,6 +111,7 @@ class AlpacaClient:
         feed: str = "iex",
         limit: int = 10_000,
         sort: str = "asc",
+        adjustment: str | None = None,
     ) -> dict[str, list[dict[str, Any]]]:
         params = {
             "symbols": ",".join(symbols),
@@ -122,6 +123,8 @@ class AlpacaClient:
         }
         if end:
             params["end"] = end
+        if adjustment:
+            params["adjustment"] = adjustment
 
         bars_by_symbol: dict[str, list[dict[str, Any]]] = {}
         page_token: str | None = None

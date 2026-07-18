@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import itertools
-import json
 import logging
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -130,6 +129,7 @@ def _load_bars_for_args(args: argparse.Namespace, config: AppConfig, logger: log
         source=source,
         cache_dir=args.cache_dir,
         feed=args.feed,
+        adjustment=args.adjustment,
         use_cache=not args.no_cache,
     )
     logger.info(
@@ -195,6 +195,11 @@ def _grid_config_from_args(args: argparse.Namespace, config: AppConfig) -> GridB
             args.recenter_up_pct,
             config.get("grid_strategy", "recenter_up_pct", default=5.0),
         ),
+        recenter_confirmation_bars=int(
+            args.recenter_confirmation_bars
+            if args.recenter_confirmation_bars is not None
+            else config.get("grid_strategy", "recenter_confirmation_bars", default=1)
+        ),
         adaptive_sizing_enabled=adaptive_sizing_enabled,
         adaptive_scale_factor=adaptive_scale_factor,
         adaptive_max_order_multiplier=_decimal_arg_or_config(
@@ -205,7 +210,11 @@ def _grid_config_from_args(args: argparse.Namespace, config: AppConfig) -> GridB
             args.max_single_order_notional,
             config.get("adaptive_sizing", "max_single_order_notional", default=None),
         ),
-        allow_fractional_shares=bool(args.allow_fractional_shares),
+        allow_fractional_shares=(
+            bool(args.allow_fractional_shares)
+            if args.allow_fractional_shares is not None
+            else bool(config.get("grid_strategy", "allow_fractional_shares", default=False))
+        ),
     )
 
 

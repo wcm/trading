@@ -447,7 +447,7 @@ def _submit_grid_intents(
                 qty=intent.qty,
                 limit_price=intent.price,
                 client_order_id=client_order_id,
-                time_in_force="gtc",
+                time_in_force=_grid_sell_time_in_force(intent.qty),
             )
             order = alpaca.submit_order(payload)
             lot.status = "sell_submitted"
@@ -457,6 +457,11 @@ def _submit_grid_intents(
             submitted.append(_submitted_order_record(intent, payload, order, lot.lot_id))
             logger.info("Submitted grid sell order lot=%s payload=%s", lot.lot_id, payload)
     return submitted
+
+
+def _grid_sell_time_in_force(qty: Decimal) -> str:
+    # Alpaca requires DAY time-in-force for fractional equity orders.
+    return "day" if qty != qty.to_integral_value() else "gtc"
 
 
 def _equity_limit_order_payload(

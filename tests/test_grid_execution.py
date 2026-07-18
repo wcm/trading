@@ -4,6 +4,7 @@ from decimal import Decimal
 
 from trading_bot.commands.grid import (
     _equity_limit_order_payload,
+    _grid_sell_time_in_force,
     _reconcile_buy_order,
     _reconcile_sell_order,
 )
@@ -144,6 +145,33 @@ def test_equity_limit_orders_support_day_buys_and_gtc_sells() -> None:
     assert sell["time_in_force"] == "gtc"
 
 
+def test_fractional_grid_sells_use_day_time_in_force() -> None:
+    assert _grid_sell_time_in_force(Decimal("5")) == "gtc"
+    assert _grid_sell_time_in_force(Decimal("5.250001")) == "day"
+
+
+def test_expired_fractional_sell_returns_lot_to_open_for_recreation() -> None:
+    lot = _open_lot(
+        status="sell_submitted",
+        sell_order_id="sell-1",
+        qty=Decimal("5.250001"),
+    )
+
+    event = _reconcile_sell_order(
+        lot,
+        {
+            "status": "expired",
+            "filled_qty": "0",
+        },
+    )
+
+    assert lot.status == "open"
+    assert lot.qty == Decimal("5.250001")
+    assert lot.sell_order_id is None
+    assert event is not None
+    assert event["order_status"] == "expired"
+
+
 def test_grid_discord_messages_are_event_only() -> None:
     quiet_artifact = {
         "symbol": "TQQQ",
@@ -207,7 +235,12 @@ def test_grid_discord_can_include_cycle_status() -> None:
     assert "**Status:** Holding shares and waiting to sell" in messages[0]
 
 
-def _open_lot(*, status: str, sell_order_id: str | None = None) -> GridLotState:
+def _open_lot(
+    *,
+    status: str,
+    sell_order_id: str | None = None,
+    qty: Decimal = Decimal("5"),
+) -> GridLotState:
     return GridLotState(
         lot_id="lot-1",
         level_index=1,
@@ -215,7 +248,7 @@ def _open_lot(*, status: str, sell_order_id: str | None = None) -> GridLotState:
         sell_target=Decimal("99.91"),
         planned_notional=Decimal("485"),
         status=status,
-        qty=Decimal("5"),
+        qty=qty,
         buy_fill_price=Decimal("97"),
         sell_order_id=sell_order_id,
     )

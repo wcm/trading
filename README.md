@@ -7,6 +7,8 @@ Start here:
 - [automatic_trading_bot_infra.md](automatic_trading_bot_infra.md): shared infrastructure, multi-strategy architecture, roadmap, and known gaps.
 - [automatic_trading_bot_runbook.md](automatic_trading_bot_runbook.md): beginner-friendly operations commands, cloud access, deploy workflow, logs, smoke tests, and emergency stop.
 - [strategy/put_credit_strategy.md](strategy/put_credit_strategy.md): current strategy explained simply.
+- [strategy/grid_strategy.md](strategy/grid_strategy.md): TQQQ grid paper strategy and operations.
+- [strategy/dca_strategy.md](strategy/dca_strategy.md): recurring fixed-investment bot and backtesting.
 - `deploy/update-cloud.sh`: one-command cloud update after local changes are committed and pushed.
 
 Current status:
@@ -14,7 +16,9 @@ Current status:
 - Alpaca paper mode only; live trading is out of scope for now.
 - Normal scheduler runs on the DigitalOcean VPS through Docker Compose.
 - Local scheduler should stay stopped while the cloud scheduler is running.
-- Only `put_credit_strategy` is implemented today; the infra plan is being shaped so multiple strategies can share the same bot infrastructure later.
+- Put credit spread, TQQQ grid, and recurring-investment strategies share the
+  same application infrastructure while using separate configs, accounts,
+  state, logs, and schedulers.
 - Paper open/close execution is protected by both config locks and CLI flags; the current cloud paper experiment deliberately enables both in paper mode.
 
 The bot cycle:

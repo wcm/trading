@@ -20,6 +20,7 @@ class GridBacktestConfig:
     max_unrealized_loss: Decimal | None = None
     pause_new_buys_after_consecutive_down_levels: int | None = None
     recenter_up_pct: Decimal | None = None
+    recenter_confirmation_bars: int = 1
     adaptive_sizing_enabled: bool = False
     adaptive_scale_factor: Decimal = Decimal("0")
     adaptive_max_order_multiplier: Decimal = Decimal("1")
@@ -117,6 +118,7 @@ class GridBacktestResult:
                     self.config.pause_new_buys_after_consecutive_down_levels
                 ),
                 "recenter_up_pct": _fmt_optional_decimal(self.config.recenter_up_pct),
+                "recenter_confirmation_bars": self.config.recenter_confirmation_bars,
                 "adaptive_sizing_enabled": self.config.adaptive_sizing_enabled,
                 "adaptive_scale_factor": _fmt_decimal(self.config.adaptive_scale_factor),
                 "adaptive_max_order_multiplier": _fmt_decimal(
@@ -149,6 +151,8 @@ def run_grid_backtest(bars: list[PriceBar], config: GridBacktestConfig) -> GridB
         raise ValueError("base_order_notional must be positive")
     if config.max_buy_levels_below_anchor <= 0:
         raise ValueError("max_buy_levels_below_anchor must be positive")
+    if config.recenter_confirmation_bars <= 0:
+        raise ValueError("recenter_confirmation_bars must be positive")
 
     spacing = config.grid_spacing_pct / Decimal("100")
     cash = config.starting_cash
@@ -169,6 +173,7 @@ def run_grid_backtest(bars: list[PriceBar], config: GridBacktestConfig) -> GridB
     max_cash_used = Decimal("0")
     longest_holding_days = 0
     recenter_count = 0
+    recenter_confirmation_count = 0
 
     for bar in bars:
         if anchor is None:
@@ -204,8 +209,7 @@ def run_grid_backtest(bars: list[PriceBar], config: GridBacktestConfig) -> GridB
         open_lots = lots_to_keep
 
         if sold_count > 0:
-            if not open_lots:
-                anchor = None
+            recenter_confirmation_count = 0
             (
                 peak_equity,
                 max_drawdown,
@@ -227,29 +231,36 @@ def run_grid_backtest(bars: list[PriceBar], config: GridBacktestConfig) -> GridB
             )
             continue
 
-        if not open_lots and _should_recenter_up(anchor, bar.close, config.recenter_up_pct):
-            anchor = bar.close
-            recenter_count += 1
-            (
-                peak_equity,
-                max_drawdown,
-                worst_unrealized,
-                max_shares,
-                max_inventory_value,
-                max_cash_used,
-            ) = _mark_bar_metrics_values(
-                bar=bar,
-                cash=cash,
-                open_lots=open_lots,
-                starting_cash=config.starting_cash,
-                peak_equity=peak_equity,
-                max_drawdown=max_drawdown,
-                worst_unrealized=worst_unrealized,
-                max_shares=max_shares,
-                max_inventory_value=max_inventory_value,
-                max_cash_used=max_cash_used,
-            )
-            continue
+        if open_lots:
+            recenter_confirmation_count = 0
+        elif _should_recenter_up(anchor, bar.close, config.recenter_up_pct):
+            recenter_confirmation_count += 1
+            if recenter_confirmation_count >= config.recenter_confirmation_bars:
+                anchor = bar.close
+                recenter_count += 1
+                recenter_confirmation_count = 0
+                (
+                    peak_equity,
+                    max_drawdown,
+                    worst_unrealized,
+                    max_shares,
+                    max_inventory_value,
+                    max_cash_used,
+                ) = _mark_bar_metrics_values(
+                    bar=bar,
+                    cash=cash,
+                    open_lots=open_lots,
+                    starting_cash=config.starting_cash,
+                    peak_equity=peak_equity,
+                    max_drawdown=max_drawdown,
+                    worst_unrealized=worst_unrealized,
+                    max_shares=max_shares,
+                    max_inventory_value=max_inventory_value,
+                    max_cash_used=max_cash_used,
+                )
+                continue
+        else:
+            recenter_confirmation_count = 0
 
         open_level_indexes = {lot.level_index for lot in open_lots}
         for level_index in range(1, config.max_buy_levels_below_anchor + 1):

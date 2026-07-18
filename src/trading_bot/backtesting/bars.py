@@ -62,6 +62,7 @@ def load_historical_bars(
     source: str,
     cache_dir: str | Path,
     feed: str | None = None,
+    adjustment: str = "split",
     use_cache: bool = True,
 ) -> list[PriceBar]:
     cache_path = _cache_path(
@@ -72,10 +73,13 @@ def load_historical_bars(
         start=start,
         end=end,
         feed=feed,
+        adjustment=adjustment,
     )
     if use_cache and cache_path.exists():
         bars = _read_cached_bars(cache_path)
-        return _regular_session_bars_for_alpaca(bars, source=source, timeframe=timeframe)
+        bars = _regular_session_bars_for_alpaca(bars, source=source, timeframe=timeframe)
+        _validate_requested_coverage(bars, start=start, end=end)
+        return bars
 
     if source == "alpaca":
         if alpaca is None:
@@ -88,12 +92,14 @@ def load_historical_bars(
             start=start,
             end=end,
             feed=feed,
+            adjustment=adjustment,
         )
     elif source == "yahoo":
         bars = _load_yahoo_bars(symbol=symbol, timeframe=timeframe, start=start, end=end)
     else:
         raise ValueError(f"Unsupported historical data source: {source}")
 
+    _validate_requested_coverage(bars, start=start, end=end)
     if use_cache:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         cache_path.write_text(
@@ -101,6 +107,29 @@ def load_historical_bars(
             encoding="utf-8",
         )
     return bars
+
+
+def _validate_requested_coverage(
+    bars: list[PriceBar],
+    *,
+    start: date,
+    end: date,
+    max_boundary_gap_days: int = 7,
+) -> None:
+    if not bars:
+        return
+    first_day = bars[0].day
+    last_day = bars[-1].day
+    if first_day > start + timedelta(days=max_boundary_gap_days):
+        raise ValueError(
+            f"Historical bars begin on {first_day}, well after requested start {start}; "
+            "refusing to run a partial-period backtest"
+        )
+    if last_day < end - timedelta(days=max_boundary_gap_days):
+        raise ValueError(
+            f"Historical bars end on {last_day}, well before requested end {end}; "
+            "refusing to run a partial-period backtest"
+        )
 
 
 def _load_alpaca_bars(
@@ -112,6 +141,7 @@ def _load_alpaca_bars(
     start: date,
     end: date,
     feed: str | None,
+    adjustment: str,
 ) -> list[PriceBar]:
     market_start = datetime.combine(start, time.min, tzinfo=EASTERN).astimezone(UTC)
     market_end = datetime.combine(end + timedelta(days=1), time.min, tzinfo=EASTERN).astimezone(UTC)
@@ -123,6 +153,7 @@ def _load_alpaca_bars(
         feed=feed or str(config.get("alpaca", "stock_data_feed", default="iex")),
         limit=10_000,
         sort="asc",
+        adjustment=adjustment,
     )
     bars = _bars_from_alpaca_rows(data.get(symbol.upper(), []))
     return _regular_session_bars_for_alpaca(bars, source="alpaca", timeframe=timeframe)
@@ -247,6 +278,7 @@ def _cache_path(
     start: date,
     end: date,
     feed: str | None,
+    adjustment: str | None,
 ) -> Path:
     safe_parts = [
         source,
@@ -257,6 +289,8 @@ def _cache_path(
     ]
     if feed:
         safe_parts.append(feed)
+    if source == "alpaca" and adjustment:
+        safe_parts.append(adjustment)
     filename = _safe_filename("_".join(safe_parts)) + ".json"
     return resolve_path(cache_dir) / filename
 
